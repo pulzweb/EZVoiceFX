@@ -55,6 +55,27 @@ jobs:
           cargo build --release -p deep_filter --features capi
           if (-not (Test-Path "target/release/df.dll")) { throw "df.dll was not produced" }
 
+      - name: Download vocal separation engine (ONNX Runtime + DirectML + MDX-Net)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest "https://www.nuget.org/api/v2/package/Microsoft.ML.OnnxRuntime.DirectML/1.20.1" -OutFile ort.zip
+          Expand-Archive ort.zip deps/ort -Force
+          Invoke-WebRequest "https://www.nuget.org/api/v2/package/Microsoft.AI.DirectML/1.15.4" -OutFile dml.zip
+          Expand-Archive dml.zip deps/dml -Force
+          New-Item -ItemType Directory -Force -Path deps/models | Out-Null
+          $model = "deps/models/UVR-MDX-NET-Voc_FT.onnx"
+          try {
+            Invoke-WebRequest "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Voc_FT.onnx" -OutFile $model
+          } catch {
+            Write-Host "GitHub mirror failed, trying Hugging Face"
+            Invoke-WebRequest "https://huggingface.co/aaatmy/uvr-mdx-net-onnx/resolve/main/UVR-MDX-NET-Voc_FT.onnx" -OutFile $model
+          }
+          Get-ChildItem -Recurse deps/ort -Include onnxruntime_c_api.h, *.dll | Select-Object FullName, Length
+          Get-ChildItem -Recurse deps/dml -Filter DirectML.dll | Select-Object FullName, Length
+          Get-Item $model | Select-Object FullName, Length
+
       - name: Configure
         shell: pwsh
         run: |
@@ -62,7 +83,10 @@ jobs:
           $src = "."
           if (-not (Test-Path "CMakeLists.txt") -and (Test-Path "EZVoiceFX/CMakeLists.txt")) { $src = "EZVoiceFX" }
           "SRC=$src" | Out-File -FilePath $env:GITHUB_ENV -Append
-          cmake -S $src -B build -A x64 "-DEZ_JUCE_DIR=$root/deps/JUCE" "-DEZ_RNNOISE_DIR=$root/deps/nsv/external/rnnoise"
+          $ortInc = ""
+          $h = Get-ChildItem -Recurse deps/ort -Filter onnxruntime_c_api.h -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($h) { $ortInc = $h.DirectoryName -replace '\\','/' }
+          cmake -S $src -B build -A x64 "-DEZ_JUCE_DIR=$root/deps/JUCE" "-DEZ_RNNOISE_DIR=$root/deps/nsv/external/rnnoise" "-DEZ_ORT_INCLUDE=$ortInc"
 
       - name: Build plugin (Release)
         run: cmake --build build --config Release --parallel
@@ -87,6 +111,21 @@ jobs:
             Write-Host "AI Pro (DeepFilterNet3) bundled"
           } else {
             Write-Host "::warning::DeepFilterNet3 was not built - plugin ships with AI Lite (RNNoise) only"
+          }
+
+          # vocal separation engine (reference analysis)
+          $ortDlls = Get-ChildItem -Recurse deps/ort -Filter *.dll -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'win-x64' }
+          $dmlDll = Get-ChildItem -Recurse deps/dml -Filter DirectML.dll -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
+          $mdx = "deps/models/UVR-MDX-NET-Voc_FT.onnx"
+          if ($ortDlls -and $dmlDll -and (Test-Path $mdx) -and ((Get-Item $mdx).Length -gt 30MB)) {
+            foreach ($target in @("dist/EZ Voice FX.vst3/Contents/x86_64-win", "dist/Standalone")) {
+              foreach ($d in $ortDlls) { Copy-Item $d.FullName "$target/" }
+              Copy-Item $dmlDll.FullName "$target/"
+              Copy-Item $mdx "$target/"
+            }
+            Write-Host "Vocal separation engine bundled"
+          } else {
+            Write-Host "::warning::Vocal separation engine missing - reference works in Fast / Acapella mode only"
           }
           Get-ChildItem -Recurse dist | Select-Object FullName, Length
 
@@ -170,5 +209,5 @@ jobs:
       - name: Upload plugin
         uses: actions/upload-artifact@v4
         with:
-          name: EZ-Voice-FX-1.2-Windows
+          name: EZ-Voice-FX-1.3-Windows
           path: dist
