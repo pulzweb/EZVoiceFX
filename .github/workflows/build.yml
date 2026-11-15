@@ -7,23 +7,41 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 90
 
-      - name: Download JUCE
+    steps:
+      - name: Checkout plugin source
+        uses: actions/checkout@v4
+
+      - name: Download JUCE framework
         uses: actions/checkout@v4
         with:
           repository: juce-framework/JUCE
           ref: 8.0.4
           path: deps/JUCE
 
-      - name: Download RNNoise
+      - name: Download RNNoise (AI Lite)
         uses: actions/checkout@v4
         with:
           repository: werman/noise-suppression-for-voice
           path: deps/nsv
           sparse-checkout: external/rnnoise
+
+      - name: Download DeepFilterNet3 (AI Pro)
+        uses: actions/checkout@v4
+        with:
+          repository: Rikorose/DeepFilterNet
+          path: deps/DeepFilterNet
+
+      - name: Build DeepFilterNet3 engine (Rust)
+        id: dfn
+        continue-on-error: true
+        shell: pwsh
+        working-directory: deps/DeepFilterNet
+        run: |
+          rustup default stable
+          cargo build --release -p deep_filter --features capi
+          if (-not (Test-Path "target/release/df.dll")) { throw "df.dll was not produced" }
 
       - name: Configure
         shell: pwsh
@@ -34,18 +52,53 @@ jobs:
           "SRC=$src" | Out-File -FilePath $env:GITHUB_ENV -Append
           cmake -S $src -B build -A x64 "-DEZ_JUCE_DIR=$root/deps/JUCE" "-DEZ_RNNOISE_DIR=$root/deps/nsv/external/rnnoise"
 
-      - name: Build
+      - name: Build plugin (Release)
         run: cmake --build build --config Release --parallel
 
       - name: Collect files
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item -Recurse "build/EZVoiceFX_artefacts/Release/VST3/EZ Voice FX.vst3" "dist/"
-          Copy-Item "build/EZVoiceFX_artefacts/Release/Standalone/EZ Voice FX.exe" "dist/" -ErrorAction SilentlyContinue
+          $art = "build/EZVoiceFX_artefacts/Release"
+          New-Item -ItemType Directory -Force -Path dist/Standalone | Out-Null
+          Copy-Item -Recurse "$art/VST3/EZ Voice FX.vst3" "dist/"
+          Copy-Item "$art/Standalone/EZ Voice FX.exe" "dist/Standalone/" -ErrorAction SilentlyContinue
           Copy-Item "$env:SRC/README.md" "dist/" -ErrorAction SilentlyContinue
 
-      - uses: actions/upload-artifact@v4
+          $dll = "deps/DeepFilterNet/target/release/df.dll"
+          $model = "deps/DeepFilterNet/models/DeepFilterNet3_onnx.tar.gz"
+          if ((Test-Path $dll) -and (Test-Path $model)) {
+            $bin = "dist/EZ Voice FX.vst3/Contents/x86_64-win"
+            Copy-Item $dll "$bin/ezvfx_deepfilter.dll"
+            Copy-Item $model "$bin/"
+            Copy-Item $dll "dist/Standalone/ezvfx_deepfilter.dll"
+            Copy-Item $model "dist/Standalone/"
+            Write-Host "AI Pro (DeepFilterNet3) bundled"
+          } else {
+            Write-Host "::warning::DeepFilterNet3 was not built - plugin ships with AI Lite (RNNoise) only"
+          }
+          Get-ChildItem -Recurse dist | Select-Object FullName, Length
+
+      - name: Validate with pluginval
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip" -OutFile pluginval.zip
+          Expand-Archive pluginval.zip -DestinationPath pluginval -Force
+          $exe = Get-ChildItem -Recurse pluginval -Filter pluginval.exe | Select-Object -First 1
+          & $exe.FullName --strictness-level 5 --skip-gui-tests --validate-in-process --validate "dist/EZ Voice FX.vst3"
+          if ($LASTEXITCODE -ne 0) { throw "pluginval reported problems (see log above)" }
+
+      - name: Build installer
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $dist = (Resolve-Path dist).Path
+          & $iscc "/DDistDir=$dist" "$env:SRC/installer/EZVoiceFX.iss"
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
         with:
-          name: EZ-Voice-FX-Windows-VST3
+          name: EZ-Voice-FX-1.1-Windows
           path: dist
