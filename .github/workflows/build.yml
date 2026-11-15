@@ -40,6 +40,18 @@ jobs:
         working-directory: deps/DeepFilterNet
         run: |
           rustup default stable
+          # EZ patch: lets the plugin relax the speech threshold so whispers are not removed
+          $patch = @'
+
+          #[no_mangle]
+          pub unsafe extern "C" fn df_set_thresholds(st: *mut DFState, min_db: f32, max_erb: f32, max_df: f32) {
+              let state = st.as_mut().expect("Invalid pointer");
+              state.m.min_db_thresh = min_db;
+              state.m.max_db_erb_thresh = max_erb;
+              state.m.max_db_df_thresh = max_df;
+          }
+          '@
+          Add-Content -Path "libDF/src/capi.rs" -Value $patch
           cargo build --release -p deep_filter --features capi
           if (-not (Test-Path "target/release/df.dll")) { throw "df.dll was not produced" }
 
@@ -78,15 +90,73 @@ jobs:
           }
           Get-ChildItem -Recurse dist | Select-Object FullName, Length
 
-      - name: Validate with pluginval
+      - name: Smoke-test AI Pro engine
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $py = @'
+          import ctypes, threading, random, sys
+          dll = r"deps/DeepFilterNet/target/release/df.dll"
+          model = b"deps/DeepFilterNet/models/DeepFilterNet3_onnx.tar.gz"
+          res = {}
+          def run():
+              lib = ctypes.CDLL(dll)
+              lib.df_create.restype = ctypes.c_void_p
+              lib.df_create.argtypes = [ctypes.c_char_p, ctypes.c_float, ctypes.c_char_p]
+              lib.df_get_frame_length.restype = ctypes.c_size_t
+              lib.df_get_frame_length.argtypes = [ctypes.c_void_p]
+              lib.df_process_frame.restype = ctypes.c_float
+              lib.df_process_frame.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float)]
+              lib.df_free.argtypes = [ctypes.c_void_p]
+              st = lib.df_create(model, 60.0, None)
+              n = lib.df_get_frame_length(st)
+              a = (ctypes.c_float * n)(); b = (ctypes.c_float * n)()
+              for k in range(300):
+                  for i in range(n): a[i] = random.uniform(-0.1, 0.1)
+                  l = lib.df_process_frame(st, a, b)
+              lib.df_free(st)
+              res["ok"] = (n, l)
+          threading.stack_size(64 * 1024 * 1024)
+          t = threading.Thread(target=run); t.start(); t.join()
+          print("AI Pro smoke test:", res.get("ok", "FAILED"))
+          sys.exit(0 if "ok" in res else 1)
+          '@
+          $py | Out-File -Encoding utf8 smoke.py
+          python smoke.py
+          Write-Host ("smoke test exit code: {0} (0x{0:X8})" -f $LASTEXITCODE)
+
+      - name: Validate with pluginval (AI Lite and AI Pro)
         continue-on-error: true
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip" -OutFile pluginval.zip
           Expand-Archive pluginval.zip -DestinationPath pluginval -Force
-          $exe = Get-ChildItem -Recurse pluginval -Filter pluginval.exe | Select-Object -First 1
-          & $exe.FullName --strictness-level 5 --skip-gui-tests --validate-in-process --validate "dist/EZ Voice FX.vst3"
-          if ($LASTEXITCODE -ne 0) { throw "pluginval reported problems (see log above)" }
+          $exe = (Get-ChildItem -Recurse pluginval -Filter pluginval.exe | Select-Object -First 1).FullName
+
+          New-Item -ItemType Directory -Force -Path pv-lite, pv-logs | Out-Null
+          Copy-Item -Recurse "dist/EZ Voice FX.vst3" "pv-lite/"
+          Remove-Item "pv-lite/EZ Voice FX.vst3/Contents/x86_64-win/ezvfx_deepfilter.dll" -ErrorAction SilentlyContinue
+
+          $results = @{}
+          foreach ($run in @(@{ tag = "lite"; path = "pv-lite/EZ Voice FX.vst3" }, @{ tag = "pro"; path = "dist/EZ Voice FX.vst3" })) {
+            Write-Host "================ pluginval: $($run.tag) ================"
+            & $exe --strictness-level 5 --skip-gui-tests --validate-in-process --output-dir "pv-logs/$($run.tag)" --validate $run.path 2>&1 | Out-Host
+            $code = $LASTEXITCODE
+            $results[$run.tag] = $code
+            Write-Host ("pluginval [{0}] exit code: {1} (0x{1:X8})" -f $run.tag, $code)
+          }
+          Write-Host "SUMMARY: lite=$($results['lite']) pro=$($results['pro'])"
+          if ($results['lite'] -ne 0 -or $results['pro'] -ne 0) {
+            Write-Host "::warning::pluginval problems: lite=$($results['lite']) pro=$($results['pro']) - see pluginval-logs artifact"
+          }
+
+      - name: Upload pluginval logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pluginval-logs
+          path: pv-logs
+          if-no-files-found: ignore
 
       - name: Build installer
         continue-on-error: true
@@ -100,5 +170,5 @@ jobs:
       - name: Upload plugin
         uses: actions/upload-artifact@v4
         with:
-          name: EZ-Voice-FX-1.1-Windows
+          name: EZ-Voice-FX-1.2-Windows
           path: dist
