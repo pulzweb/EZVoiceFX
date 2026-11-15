@@ -7,11 +7,15 @@ namespace ez
 {
 //==============================================================================
 // De-plosive: tames "P" / "B" air bursts below ~150 Hz relative to the upper band.
+// 2 ms look-ahead so the very start of the burst is caught too.
 class DeplosiveChannel
 {
 public:
     void prepare (double fs)
     {
+        lookahead = std::max (1, (int) std::lround (0.002 * fs));
+        loDelay.prepare (lookahead);
+        xDelay.prepare (lookahead);
         xo.set (fs, 150.0);
         xo.reset();
         loEnv.set (fs, 1.0, 60.0);   loEnv.reset();
@@ -25,6 +29,7 @@ public:
 
     void setAmount (float a) noexcept { target = std::clamp (a, 0.0f, 1.0f); }
     float getGain() const noexcept { return g; }
+    int getLatency() const noexcept { return lookahead; }
 
     inline float processSample (float x) noexcept
     {
@@ -32,6 +37,8 @@ public:
 
         float lo, hi;
         xo.process (x, lo, hi);
+        const float loD = loDelay.process (lo);
+        const float xD  = xDelay.process (x);
         const float le = loEnv.process (std::abs (lo));
         const float he = hiEnv.process (std::abs (hi));
 
@@ -45,11 +52,13 @@ public:
 
         const float c = tg < g ? gAtt : gRel;
         g = tg + c * (g - tg);
-        return hi + lo * g;
+        return xD - (1.0f - g) * loD;      // subtractive: bit-exact when idle
     }
 
 private:
     Crossover xo;
+    DelayLine loDelay, xDelay;
+    int lookahead = 96;
     EnvFollower loEnv, hiEnv;
     float gAtt = 0.0f, gRel = 0.0f, g = 1.0f;
     float amt = 0.0f, target = 0.0f, amtAlpha = 0.001f;
@@ -61,8 +70,10 @@ private:
 class DeEsserChannel
 {
 public:
-    void prepare (double fs)
+    void prepare (double sampleRate)
     {
+        fs = sampleRate;
+        freq = 5500.0f;
         xo.set (fs, std::min (5500.0, fs * 0.4));
         xo.reset();
         hiEnv.set (fs, 0.5, 40.0);   hiEnv.reset();
@@ -76,6 +87,13 @@ public:
 
     void setAmount (float a) noexcept { target = std::clamp (a, 0.0f, 1.0f); }
     float getGain() const noexcept { return g; }
+
+    void setFrequency (float f) noexcept
+    {
+        if (std::abs (f - freq) < 5.0f) return;
+        freq = f;
+        xo.set (fs, std::min ((double) f, fs * 0.4));   // coefficient update keeps filter state
+    }
 
     inline float processSample (float x) noexcept
     {
@@ -101,10 +119,12 @@ public:
 
         const float c = tg < g ? gAtt : gRel;
         g = tg + c * (g - tg);
-        return lo + hi * g;
+        return x - (1.0f - g) * hi;        // subtractive: bit-exact when idle
     }
 
 private:
+    double fs = 48000.0;
+    float freq = 5500.0f;
     Crossover xo;
     EnvFollower hiEnv, fullEnv;
     float gAtt = 0.0f, gRel = 0.0f, g = 1.0f;
@@ -134,6 +154,7 @@ public:
     }
 
     void setAmount (float a) noexcept { target = std::clamp (a, 0.0f, 1.0f); }
+    void setVad (float v) noexcept { vad = v; }
     float getGain() const noexcept { return g; }
 
     void process (float* const* ch, int numCh, int n) noexcept
@@ -154,7 +175,7 @@ public:
             prevPos = pos;
 
             bool breath = amt > 0.01f && vp > 1.0e-3f && e > 1.0e-4f
-                          && e < vp * 0.2f && zcr > zcThr;
+                          && e < vp * 0.2f && zcr > zcThr && vad < 0.6f;
             if (breath) hold = holdLen;
             else if (hold > 0) { --hold; breath = true; }
 
@@ -168,7 +189,7 @@ public:
 
 private:
     EnvFollower env;
-    float vpDecay = 0.9999f, vp = 0.0f, zcAlpha = 0.01f, zcr = 0.0f, zcThr = 0.1f;
+    float vpDecay = 0.9999f, vp = 0.0f, zcAlpha = 0.01f, zcr = 0.0f, zcThr = 0.1f, vad = 0.0f;
     bool prevPos = true;
     float gAtt = 0.0f, gRel = 0.0f, g = 1.0f;
     int holdLen = 0, hold = 0;

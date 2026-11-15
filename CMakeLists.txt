@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(EZVoiceFX VERSION 1.0.0 LANGUAGES C CXX)
+project(EZVoiceFX VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,7 +57,10 @@ juce_add_plugin(EZVoiceFX
 
 target_sources(EZVoiceFX PRIVATE
     Source/PluginProcessor.cpp
-    Source/PluginEditor.cpp)
+    Source/PluginEditor.cpp
+    Source/Presets.cpp
+    Source/ui/Widgets.cpp
+    Source/ui/Pages.cpp)
 
 target_include_directories(EZVoiceFX PRIVATE Source)
 

@@ -3,64 +3,63 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "PluginProcessor.h"
-#include "EZLookAndFeel.h"
+#include "Presets.h"
+#include "ui/LookAndFeel.h"
+#include "ui/Widgets.h"
+#include "ui/Pages.h"
 
 //==============================================================================
-class ModuleCard : public juce::Component
+// The whole interface at its base size (1100 x 700). The editor scales it.
+class MainUI : public juce::Component
 {
 public:
-    ModuleCard (juce::AudioProcessorValueTreeState& state,
-                const juce::String& title, const juce::String& subtitle,
-                const char* knobParamId, const char* powerParamId,
-                juce::Colour accent, const juce::String& tooltip, bool aiBadge = false);
+    static constexpr int kW = 1100, kH = 700;
 
+    MainUI (EZVoiceFXAudioProcessor& p, ezui::EZLookAndFeel& lnf);
     void paint (juce::Graphics&) override;
     void resized() override;
-    void refresh();                 // called from the editor timer
+    void refresh();                 // 30 Hz from the editor timer
 
-    void setMeterValue (float v01) { meter = juce::jlimit (0.0f, 1.0f, v01); }
-
-protected:
-    juce::Rectangle<int> knobArea;  // subclasses may change the layout
-    juce::Slider knob;
-    juce::ToggleButton power;
-    juce::Colour accent;
+    std::function<void (int)> onThemeChange;
+    std::function<void (float)> onScaleChange;
+    float currentScale = 1.0f;
 
 private:
-    juce::String title, subtitle;
-    bool hasPower = false, ai = false, lastOn = true;
-    float meter = 0.0f, lastMeter = -1.0f;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> knobAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> powerAtt;
-};
+    void selectPage (int index);
+    void refreshPresetList();
+    void savePreset();
+    void showSettingsMenu();
 
-//==============================================================================
-class AutoLevelCard : public ModuleCard
-{
-public:
-    AutoLevelCard (EZVoiceFXAudioProcessor& p);
-    void resized() override;
-    void refreshLearn();
-
-private:
     EZVoiceFXAudioProcessor& proc;
-    juce::ComboBox mode;
-    juce::TextButton learn;
-    juce::Label info;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> modeAtt;
-};
+    ezui::EZLookAndFeel& lnf;
+    PresetManager presets;
 
-//==============================================================================
-class MeterPanel : public juce::Component
-{
-public:
-    explicit MeterPanel (EZVoiceFXAudioProcessor& p) : proc (p) {}
-    void paint (juce::Graphics&) override;
+    juce::ComboBox presetBox;
+    ezui::IconButton saveBtn { ezui::IconButton::Icon::Save, juce::String::fromUTF8 ("Сохранить пресет") };
+    ezui::IconButton undoBtn { ezui::IconButton::Icon::Undo, juce::String::fromUTF8 ("Отменить") };
+    ezui::IconButton redoBtn { ezui::IconButton::Icon::Redo, juce::String::fromUTF8 ("Повторить") };
+    ezui::IconButton gearBtn { ezui::IconButton::Icon::Gear, juce::String::fromUTF8 ("Настройки: тема, размер окна") };
 
-private:
-    void drawBar (juce::Graphics&, juce::Rectangle<float> r, const juce::String& label,
-                  float valueDb, float minDb, float maxDb, juce::Colour c, const juce::String& text);
-    EZVoiceFXAudioProcessor& proc;
+    ezui::SidebarTab tabMain { "Main", ezui::SidebarTab::Icon::Main };
+    ezui::SidebarTab tabClean { "Clean", ezui::SidebarTab::Icon::Clean };
+    ezui::SidebarTab tabLevel { "Level", ezui::SidebarTab::Icon::Level };
+    ezui::SidebarTab tabAdv { "Advanced", ezui::SidebarTab::Icon::Advanced };
+
+    ezui::SpectrumView spectrum;
+    ezui::HistoryView history;
+    ezui::OutputMeter meter;
+
+    std::unique_ptr<ezui::Page> pages[4];
+    int currentPage = 0;
+
+    juce::Slider mixSlider, outSlider;
+    ezui::IconButton listenBtn { ezui::IconButton::Icon::Headphones, juce::String::fromUTF8 ("Слушать удалённое (что убирает плагин)") };
+    ezui::IconButton powerBtn { ezui::IconButton::Icon::Power, juce::String::fromUTF8 ("Вкл / Bypass") };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mixAtt, outAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> listenAtt, powerAtt;
+
+    juce::String lastPresetName, lastBottomText;
+    bool lastPro = false;
 };
 
 //==============================================================================
@@ -70,27 +69,19 @@ public:
     explicit EZVoiceFXAudioProcessorEditor (EZVoiceFXAudioProcessor&);
     ~EZVoiceFXAudioProcessorEditor() override;
 
-    void paint (juce::Graphics&) override;
     void resized() override;
 
 private:
     void timerCallback() override;
+    void applyTheme (int index);
+    void applyScale (float s);
 
     EZVoiceFXAudioProcessor& proc;
     ezui::EZLookAndFeel lnf;
+    std::unique_ptr<juce::PropertiesFile> settings;
     juce::TooltipWindow tooltips { this, 700 };
-
-    std::unique_ptr<ModuleCard> lowcut, declick, denoise, deplosive, dereverb, breath, deess, limiter;
-    std::unique_ptr<AutoLevelCard> level;
-    MeterPanel meterPanel;
-
-    juce::Slider outKnob;
-    juce::TextButton bypassBtn { "BYPASS" };
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> outAtt;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAtt;
-
-    int lastClicks = 0;
-    float clickFlash = 0.0f;
+    MainUI ui;
+    int tick = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EZVoiceFXAudioProcessorEditor)
 };

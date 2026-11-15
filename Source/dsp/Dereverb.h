@@ -43,6 +43,7 @@ public:
 
     int getLatency() const noexcept { return N; }
     void setAmount (float a) noexcept { target = std::clamp (a, 0.0f, 1.0f); }
+    void setRoom (float rt60Seconds) noexcept { room = std::clamp (rt60Seconds, 0.15f, 2.0f); }
 
     inline float processSample (float x) noexcept
     {
@@ -74,7 +75,7 @@ private:
         float* cur = &hist[(size_t) (histPos * bins)];
         const float* old = &hist[(size_t) (((histPos + 1) % slots) * bins)];   // delayFrames ago
 
-        const float rt60  = 0.4f + 0.6f * a;
+        const float rt60  = room * (0.7f + 0.6f * a);
         const float delta = 3.0f * std::log (10.0f) / rt60;
         const float td    = (float) (delayFrames * hop / fs);
         const float decay = std::exp (-2.0f * delta * td);
@@ -121,6 +122,6 @@ private:
     std::vector<std::complex<float>> frame;
     int delayFrames = 9, slots = 10, histPos = 0;
     int pos = 0, hopCount = 0;
-    float amount = 0.0f, target = 0.0f;
+    float amount = 0.0f, target = 0.0f, room = 0.6f;
 };
 } // namespace ez

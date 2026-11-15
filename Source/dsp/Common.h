@@ -99,6 +99,16 @@ struct Biquad
                          1.0 + alpha, -2.0 * cs, 1.0 - alpha);
     }
 
+    // constant 0 dB peak band-pass (x - bandpass = notch)
+    void setBandpass (double fs, double freq, double q) noexcept
+    {
+        freq = std::clamp (freq, 5.0, 0.45 * fs);
+        const double w0 = 2.0 * kPi * freq / fs;
+        const double cs = std::cos (w0), sn = std::sin (w0);
+        const double alpha = sn / (2.0 * q);
+        setCoefficients (alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cs, 1.0 - alpha);
+    }
+
     inline float process (float xin) noexcept
     {
         const double x = xin;
@@ -149,6 +159,30 @@ struct DelayLine
         const float y = buf[(size_t) idx];
         buf[(size_t) idx] = x;
         if (++idx >= (int) buf.size()) idx = 0;
+        return y;
+    }
+};
+
+//==============================================================================
+// Delay line whose delay can change at run time (0 .. size-1 samples)
+struct VarDelay
+{
+    std::vector<float> buf;
+    int w = 0, mask = 0;
+
+    void prepare (int maxDelay)
+    {
+        const int size = nextPow2 (std::max (2, maxDelay + 1));
+        buf.assign ((size_t) size, 0.0f);
+        mask = size - 1;
+        w = 0;
+    }
+
+    inline float process (float x, int delay) noexcept
+    {
+        buf[(size_t) w] = x;
+        const float y = buf[(size_t) ((w - delay) & mask)];
+        w = (w + 1) & mask;
         return y;
     }
 };
