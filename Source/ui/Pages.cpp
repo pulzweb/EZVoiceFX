@@ -267,12 +267,8 @@ void AdvancedPage::engineChosen()
         confirming = true;
         engine.setSelectedId (current + 1, juce::dontSendNotification);
         auto* w = new juce::AlertWindow (ru ("Включить AI Pro?"),
-            ru ("Тест показал, что этот компьютер может не справиться с AI Pro в реальном времени.
-
-"
-                "Возможны щелчки, зависания и даже вылет DAW. Сохраните проект перед включением.
-
-"
+            ru ("Тест показал, что этот компьютер может не справиться с AI Pro в реальном времени.\n\n"
+                "Возможны щелчки, зависания и даже вылет DAW. Сохраните проект перед включением.\n\n"
                 "Включить AI Pro всё равно?"),
             juce::MessageBoxIconType::WarningIcon);
         w->addButton (ru ("Включить, проект сохранён"), 1);
