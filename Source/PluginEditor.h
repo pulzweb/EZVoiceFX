@@ -7,6 +7,7 @@
 #include "ui/LookAndFeel.h"
 #include "ui/Widgets.h"
 #include "ui/Pages.h"
+#include "ui/Magic.h"
 
 //==============================================================================
 // The whole interface at its base size (1100 x 700). The editor scales it.
@@ -29,6 +30,9 @@ private:
     void refreshPresetList();
     void savePreset();
     void showSettingsMenu();
+    void startMagicFlow();
+    void setRole (bool beat);
+    void updateRoleVisibility();
 
     EZVoiceFXAudioProcessor& proc;
     ezui::EZLookAndFeel& lnf;
@@ -58,8 +62,14 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mixAtt, outAtt;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> listenAtt, powerAtt;
 
+    juce::TextButton magicBtn;
+    std::unique_ptr<ezui::WelcomeOverlay> welcome;
+    ezui::MagicOverlay magic;
+    ezui::BeatPanel beatPanel;
+
     juce::String lastPresetName, lastBottomText;
-    bool lastPro = false;
+    bool lastPro = false, lastBeatRole = false, magicVisible = false;
+    int lastBeats = -1;
 };
 
 //==============================================================================

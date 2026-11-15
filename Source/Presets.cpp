@@ -18,12 +18,12 @@ const std::vector<Factory>& factory()
                             { "deplosive_amt", 45 }, { "dereverb_amt", 30 }, { "breath_amt", 35 }, { "gate_amt", 40 } } },
         { "Rap / Hip-Hop", { { "lowcut_freq", 80 }, { "denoise_amt", 85 }, { "deess_amt", 55 }, { "deess_freq", 6000 },
                              { "deplosive_amt", 70 }, { "dereverb_amt", 40 }, { "breath_amt", 45 }, { "gate_amt", 55 },
-                             { "level_target", -16 } } },
+                             { "level_target", -16 }, { "vox_amt", 45 }, { "fit_amt", 60 } } },
         { "Whisper / ASMR", { { "lowcut_freq", 70 }, { "denoise_amt", 60 }, { "declick_amt", 65 }, { "deess_amt", 40 },
                               { "deess_freq", 6500 }, { "deplosive_amt", 40 }, { "dereverb_amt", 20 }, { "breath_amt", 10 },
-                              { "gate_amt", 20 }, { "level_target", -20 } } },
+                              { "gate_amt", 20 }, { "level_target", -20 }, { "whisper", 1 }, { "vox_amt", 15 } } },
         { "Podcast / Voice-over", { { "lowcut_freq", 85 }, { "denoise_amt", 85 }, { "deess_amt", 50 }, { "deplosive_amt", 60 },
-                                    { "dereverb_amt", 50 }, { "breath_amt", 40 }, { "gate_amt", 60 }, { "level_target", -16 } } },
+                                    { "dereverb_amt", 50 }, { "breath_amt", 40 }, { "gate_amt", 60 }, { "level_target", -16 }, { "vox_amt", 40 } } },
         { "Backing Vocals", { { "lowcut_freq", 150 }, { "denoise_amt", 80 }, { "deess_amt", 70 }, { "deess_freq", 6500 },
                               { "breath_amt", 60 }, { "gate_amt", 60 }, { "dereverb_amt", 40 }, { "level_target", -20 } } },
         { "Gentle Touch", { { "denoise_amt", 45 }, { "declick_amt", 25 }, { "deess_amt", 30 }, { "deplosive_amt", 30 },
@@ -119,7 +119,7 @@ bool PresetManager::saveUser (const juce::String& rawName)
     if (name.isEmpty()) return false;
 
     juce::XmlElement root ("EZVoiceFXPreset");
-    root.setAttribute ("version", "1.1");
+    root.setAttribute ("version", "1.2");
     for (auto* p : state.processor.getParameters())
         if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
         {

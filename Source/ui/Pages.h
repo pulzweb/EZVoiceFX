@@ -44,11 +44,11 @@ public:
 
 private:
     EZVoiceFXAudioProcessor& proc;
-    juce::ComboBox mode;
+    juce::ComboBox mode, group;
     juce::TextButton learn;
     SwitchToggle autoLearn, assist;
     juce::Label info;
-    std::unique_ptr<APVTS::ComboBoxAttachment> modeAtt;
+    std::unique_ptr<APVTS::ComboBoxAttachment> modeAtt, groupAtt;
     std::unique_ptr<APVTS::ButtonAttachment> autoAtt, assistAtt;
 };
 
@@ -64,10 +64,14 @@ public:
 
 private:
     EZVoiceFXAudioProcessor& proc;
+    void engineChosen();
+    void setEngineParam (int index);
+
     juce::ComboBox engine, humFreq, listen;
-    SwitchToggle mono, matchBypass;
-    juce::Label status, info;
-    std::unique_ptr<APVTS::ComboBoxAttachment> engineAtt, humAtt, listenAtt;
-    std::unique_ptr<APVTS::ButtonAttachment> monoAtt, matchAtt;
+    SwitchToggle mono, matchBypass, whisper;
+    juce::Label status, info, hardware;
+    std::unique_ptr<APVTS::ComboBoxAttachment> humAtt, listenAtt;
+    std::unique_ptr<APVTS::ButtonAttachment> monoAtt, matchAtt, whisperAtt;
+    bool confirming = false;
 };
 } // namespace ezui

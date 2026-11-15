@@ -147,6 +147,8 @@ public:
         gAtt = timeCoef (fs, 12.0);
         gRel = timeCoef (fs, 40.0);
         holdLen = (int) std::lround (0.015 * fs);
+        maxBreath = (int) std::lround (0.65 * fs);   // longer than this = whispered words, not a breath
+        run = 0;
         hold = 0;
         g = 1.0f; vp = 0.0f; zcr = 0.0f; prevPos = true;
         amt = target = 0.0f;
@@ -155,6 +157,7 @@ public:
 
     void setAmount (float a) noexcept { target = std::clamp (a, 0.0f, 1.0f); }
     void setVad (float v) noexcept { vad = v; }
+    void setWhisper (bool w) noexcept { whisper = w; }
     float getGain() const noexcept { return g; }
 
     void process (float* const* ch, int numCh, int n) noexcept
@@ -176,10 +179,13 @@ public:
 
             bool breath = amt > 0.01f && vp > 1.0e-3f && e > 1.0e-4f
                           && e < vp * 0.2f && zcr > zcThr && vad < 0.6f;
+            run = breath ? run + 1 : 0;
+            if (run > maxBreath) breath = false;            // too long for a breath: whisper, keep it
             if (breath) hold = holdLen;
-            else if (hold > 0) { --hold; breath = true; }
+            else if (hold > 0 && run <= maxBreath) { --hold; breath = true; }
 
-            const float tg = breath ? dbToGain (-20.0f * amt) : 1.0f;
+            const float depth = whisper ? -6.0f : -20.0f;
+            const float tg = breath ? dbToGain (depth * amt) : 1.0f;
             const float c = tg < g ? gAtt : gRel;
             g = tg + c * (g - tg);
 
@@ -192,7 +198,8 @@ private:
     float vpDecay = 0.9999f, vp = 0.0f, zcAlpha = 0.01f, zcr = 0.0f, zcThr = 0.1f, vad = 0.0f;
     bool prevPos = true;
     float gAtt = 0.0f, gRel = 0.0f, g = 1.0f;
-    int holdLen = 0, hold = 0;
+    int holdLen = 0, hold = 0, maxBreath = 31000, run = 0;
+    bool whisper = false;
     float amt = 0.0f, target = 0.0f, amtAlpha = 0.001f;
 };
 } // namespace ez

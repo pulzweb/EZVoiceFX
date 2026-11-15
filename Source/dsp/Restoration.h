@@ -110,6 +110,7 @@ public:
 
     void setAmount (float a) noexcept { target = std::clamp (a, 0.0f, 1.0f); }
     void setVad (float v) noexcept { vad = v; }
+    void setWhisper (bool w) noexcept { whisper = w; }
     float getGain() const noexcept { return g; }
 
     void process (float* const* ch, int numCh, int n) noexcept
@@ -123,8 +124,9 @@ public:
             const float e = env.process (peak);
             vp = std::max (e, vp * vpDecay);
 
-            const bool open = vad > 0.45f || e > vp * 0.05f || vp < 1.0e-4f;
-            if (open) hold = holdLen;
+            const float rel = whisper ? 0.008f : 0.05f;     // -42 dB vs -26 dB below the voice peak
+            const bool open = vad > (whisper ? 0.2f : 0.45f) || e > vp * rel || vp < 1.0e-4f;
+            if (open) hold = whisper ? holdLen * 2 : holdLen;
             else if (hold > 0) --hold;
 
             const float tg = (open || hold > 0) ? 1.0f : dbToGain (-30.0f * amt);
@@ -138,6 +140,7 @@ public:
 private:
     EnvFollower env;
     float vpDecay = 0.9999f, vp = 0.0f, vad = 1.0f;
+    bool whisper = false;
     float gAtt = 0.0f, gRel = 0.0f, g = 1.0f;
     int holdLen = 0, hold = 0;
     float amt = 0.0f, target = 0.0f, amtAlpha = 0.001f;

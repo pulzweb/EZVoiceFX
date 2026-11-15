@@ -27,6 +27,7 @@ public:
     using ProcessFn  = float (*) (void*, float*, float*);
     using SetLimFn   = void (*) (void*, float);
     using FreeFn     = void (*) (void*);
+    using ThreshFn   = void (*) (void*, float, float, float);
 
     static DeepFilterLib& get()
     {
@@ -57,6 +58,17 @@ public:
     float process (void* st, float* in, float* out) const noexcept { return processFn (st, in, out); }
     void setAttenuation (void* st, float db) const noexcept { setLimFn (st, db); }
 
+    // optional (added by the EZ build patch): lower speech threshold keeps whispers
+    bool canSetThresholds() const noexcept { return threshFn != nullptr; }
+    void setThresholds (void* st, float minDb, float maxErb, float maxDf) const noexcept
+    {
+        if (threshFn != nullptr) threshFn (st, minDb, maxErb, maxDf);
+    }
+
+    // performance benchmark: milliseconds per 10 ms frame, -1 = not measured yet
+    float getBenchMs() const noexcept { return benchMs.load(); }
+    void setBenchMs (float ms) noexcept { float e = -1.0f; benchMs.compare_exchange_strong (e, ms); }
+
 private:
     DeepFilterLib()
     {
@@ -79,6 +91,7 @@ private:
         processFn  = reinterpret_cast<ProcessFn>  (lib.getFunction ("df_process_frame"));
         setLimFn   = reinterpret_cast<SetLimFn>   (lib.getFunction ("df_set_atten_lim"));
         freeFn     = reinterpret_cast<FreeFn>     (lib.getFunction ("df_free"));
+        threshFn   = reinterpret_cast<ThreshFn>   (lib.getFunction ("df_set_thresholds"));
 
         if (createFn == nullptr || frameLenFn == nullptr || processFn == nullptr
             || setLimFn == nullptr || freeFn == nullptr)
@@ -97,9 +110,47 @@ private:
     ProcessFn processFn = nullptr;
     SetLimFn setLimFn = nullptr;
     FreeFn freeFn = nullptr;
+    ThreshFn threshFn = nullptr;
+    std::atomic<float> benchMs { -1.0f };
     juce::String modelPath, status { "AI Pro: not loaded" };
     bool available = false;
     std::mutex mutex;
+};
+
+//==============================================================================
+// Loads one DeepFilterNet3 instance on its own thread with a 32 MB stack.
+// Model optimisation is deeply recursive and can overflow a host's 1 MB thread stack;
+// loading in the background also keeps plugin scanning / prepareToPlay fast.
+class DeepFilterLoader : public juce::Thread
+{
+public:
+    DeepFilterLoader() : juce::Thread ("EZ Voice FX AI loader", 32 * 1024 * 1024) {}
+    ~DeepFilterLoader() override { waitForThreadToExit (-1); }
+
+    void run() override
+    {
+        auto& lib = DeepFilterLib::get();
+        void* st = lib.create (60.0f);
+        if (st != nullptr && lib.getBenchMs() < 0.0f)
+        {
+            // quick benchmark on noise: decides Auto mode (Pro or Lite)
+            float in[480], out[480];
+            juce::Random rnd;
+            for (int k = 0; k < 10; ++k) { for (auto& v : in) v = (rnd.nextFloat() - 0.5f) * 0.05f; lib.process (st, in, out); }
+            const double t0 = juce::Time::getMillisecondCounterHiRes();
+            for (int k = 0; k < 60; ++k) { for (auto& v : in) v = (rnd.nextFloat() - 0.5f) * 0.05f; lib.process (st, in, out); }
+            lib.setBenchMs ((float) ((juce::Time::getMillisecondCounterHiRes() - t0) / 60.0));
+        }
+        result.store (st);
+        done.store (true);
+    }
+
+    bool isDone() const noexcept { return done.load(); }
+    void* take() noexcept { return result.exchange (nullptr); }
+
+private:
+    std::atomic<void*> result { nullptr };
+    std::atomic<bool> done { false };
 };
 
 //==============================================================================
@@ -149,6 +200,12 @@ public:
     ~DenoiseChannel()
     {
         releaseRn();
+        if (loader != nullptr)
+        {
+            loader->waitForThreadToExit (-1);
+            if (void* pending = loader->take()) DeepFilterLib::get().destroy (pending);
+            loader.reset();
+        }
         if (df != nullptr) DeepFilterLib::get().destroy (df);
     }
     DenoiseChannel (const DenoiseChannel&) = delete;
@@ -159,9 +216,13 @@ public:
     {
         releaseRn();
         rn = rnnoise_create (nullptr);
-        if (df == nullptr && DeepFilterLib::get().isAvailable())
-            df = DeepFilterLib::get().create (60.0f);
+        if (df == nullptr && loader == nullptr && DeepFilterLib::get().isAvailable())
+        {
+            loader = std::make_unique<DeepFilterLoader>();
+            loader->startThread();
+        }
         lastLim = -1.0f;
+        lastWhisper = ! whisper;   // force threshold update
 
         resample = std::abs (hostRate - 48000.0) > 0.5;
         ratio = hostRate / 48000.0;
@@ -206,8 +267,10 @@ public:
     int getLatency() const noexcept { return latency; }
     void setAmount (float a) noexcept { amtTarget = std::clamp (a, 0.0f, 1.0f); }
     void setUsePro (bool p) noexcept { usePro = p; }
+    void setWhisper (bool w) noexcept { whisper = w; }
     bool isProActive() const noexcept { return df != nullptr && dfW > 0.5f; }
     bool hasPro() const noexcept { return df != nullptr; }
+    bool isProLoading() const noexcept { return df == nullptr && loader != nullptr && ! loader->isDone(); }
     float getVad() const noexcept { return vad.load(); }
 
     inline float processSample (float x) noexcept
@@ -231,6 +294,9 @@ private:
 
     void processFrame() noexcept
     {
+        if (df == nullptr && loader != nullptr && loader->isDone())
+            df = loader->take();          // thread already finished: no blocking here
+
         const float a0 = amtCur, a1 = amtTarget;
         amtCur = a1;
         constexpr float inv = 1.0f / 32768.0f;
@@ -264,11 +330,18 @@ private:
         float lsnr = -15.0f;
         if (df != nullptr && (wantPro || dfW > 0.0f))
         {
-            const float lim = a1 >= 0.995f ? 100.0f : std::max (0.5f, a1 * 60.0f);
+            float lim = a1 >= 0.995f ? 100.0f : std::max (0.5f, a1 * 60.0f);
+            if (whisper) lim = std::min (lim, 30.0f);            // never fully mute in whisper mode
             if (std::abs (lim - lastLim) > 0.1f)
             {
                 DeepFilterLib::get().setAttenuation (df, lim);
                 lastLim = lim;
+            }
+            if (whisper != lastWhisper)
+            {
+                // default -15 dB speech threshold zeroes very quiet speech; relax it
+                DeepFilterLib::get().setThresholds (df, whisper ? -40.0f : -25.0f, 35.0f, 35.0f);
+                lastWhisper = whisper;
             }
             std::copy (std::begin (inBuf), std::end (inBuf), std::begin (dfIn));
             lsnr = DeepFilterLib::get().process (df, dfIn, dfOut);
@@ -351,7 +424,8 @@ private:
 
     DenoiseState* rn = nullptr;
     void* df = nullptr;
-    bool usePro = true;
+    std::unique_ptr<DeepFilterLoader> loader;
+    bool usePro = true, whisper = false, lastWhisper = true;
     float lastLim = -1.0f;
 
     bool resample = false, antiAlias = false;

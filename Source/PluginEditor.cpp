@@ -5,7 +5,7 @@ static juce::String ru (const char* s) { return juce::String::fromUTF8 (s); }
 
 //==============================================================================
 MainUI::MainUI (EZVoiceFXAudioProcessor& p, ezui::EZLookAndFeel& l)
-    : proc (p), lnf (l), presets (p.apvts), spectrum (p), history (p), meter (p)
+    : proc (p), lnf (l), presets (p.apvts), spectrum (p), history (p), meter (p), magic (p), beatPanel (p)
 {
     auto& s = p.apvts;
 
@@ -27,6 +27,7 @@ MainUI::MainUI (EZVoiceFXAudioProcessor& p, ezui::EZLookAndFeel& l)
     redoBtn.onClick = [this] { proc.undoManager.redo(); };
     gearBtn.onClick = [this] { showSettingsMenu(); };
     for (auto* b : { &saveBtn, &undoBtn, &redoBtn, &gearBtn }) addAndMakeVisible (*b);
+    magicBtn.setToggleState (true, juce::dontSendNotification);     // drawn with the accent gradient
 
     // ---- sidebar ----
     ezui::SidebarTab* tabs[] = { &tabMain, &tabClean, &tabLevel, &tabAdv };
@@ -67,7 +68,67 @@ MainUI::MainUI (EZVoiceFXAudioProcessor& p, ezui::EZLookAndFeel& l)
     listenAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (s, ParamIDs::listen, listenBtn);
     powerAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (s, ParamIDs::bypass, powerBtn);
 
+    // ---- magic, beat link, welcome ----
+    magicBtn.setButtonText ("MAGIC");
+    magicBtn.setTooltip (ru ("Сделать магию: плагин послушает капу и бит и настроит всё сам"));
+    magicBtn.setClickingTogglesState (false);
+    magicBtn.onClick = [this] { startMagicFlow(); };
+    addAndMakeVisible (magicBtn);
+
+    addChildComponent (beatPanel);
+    beatPanel.onMakeVocal = [this] { setRole (false); };
+
+    addChildComponent (magic);
+    magic.onCancel = [this] { proc.cancelMagic(); magic.setVisible (false); magicVisible = false; };
+    magic.onFinish = [this] { proc.finishMagic(); };
+    magic.onManual = [this] { proc.resetMagic(); magic.setVisible (false); magicVisible = false; selectPage (0); };
+    magic.onAgain  = [this] { proc.startMagic(); };
+
+    if (! (bool) proc.getUiProperty ("welcomeDone", false))
+    {
+        welcome = std::make_unique<ezui::WelcomeOverlay>();
+        welcome->onMagic  = [this] { proc.setUiProperty ("welcomeDone", true); welcome->setVisible (false); startMagicFlow(); };
+        welcome->onManual = [this] { proc.setUiProperty ("welcomeDone", true); welcome->setVisible (false); };
+        welcome->onBeat   = [this] { proc.setUiProperty ("welcomeDone", true); welcome->setVisible (false); setRole (true); };
+        addAndMakeVisible (*welcome);
+    }
+
     selectPage ((int) proc.getUiProperty ("page", 0));
+    updateRoleVisibility();
+}
+
+void MainUI::startMagicFlow()
+{
+    if (proc.isBeatRole()) setRole (false);
+    proc.startMagic();
+    magicVisible = true;
+    magic.setVisible (true);
+    magic.toFront (false);
+}
+
+void MainUI::setRole (bool beat)
+{
+    if (auto* prm = proc.apvts.getParameter (ParamIDs::role))
+    {
+        prm->beginChangeGesture();
+        prm->setValueNotifyingHost (beat ? 1.0f : 0.0f);
+        prm->endChangeGesture();
+    }
+}
+
+void MainUI::updateRoleVisibility()
+{
+    const bool beat = proc.isBeatRole();
+    lastBeatRole = beat;
+    beatPanel.setVisible (beat);
+    for (auto* c : { (juce::Component*) &tabMain, (juce::Component*) &tabClean, (juce::Component*) &tabLevel,
+                     (juce::Component*) &tabAdv, (juce::Component*) &spectrum, (juce::Component*) &history })
+        c->setVisible (! beat);
+    for (int i = 0; i < 4; ++i) pages[i]->setVisible (! beat && i == currentPage);
+    if (! beat) { history.setVisible (currentPage == 2); spectrum.setVisible (currentPage != 2); }
+    listenBtn.setVisible (! beat);
+    magicBtn.setVisible (! beat);
+    repaint();
 }
 
 void MainUI::selectPage (int index)
@@ -132,7 +193,7 @@ void MainUI::showSettingsMenu()
         sizeMenu.addItem (200 + i, juce::String (juce::roundToInt (sizes[i] * 100.0f)) + " %", true,
                           std::abs (sizes[i] - currentScale) < 0.01f);
 
-    menu.addSectionHeader ("EZ Voice FX 1.1");
+    menu.addSectionHeader ("EZ Voice FX 1.2");
     menu.addSubMenu (ru ("Тема оформления"), themeMenu);
     menu.addSubMenu (ru ("Размер окна"), sizeMenu);
     menu.addSeparator();
@@ -169,6 +230,11 @@ void MainUI::resized()
     history.setBounds (display);
     for (auto& pg : pages) pg->setBounds (112, 316, 892, 272);
     meter.setBounds (1024, 108, 60, 470);
+
+    magicBtn.setBounds (464, 24, 120, 34);
+    beatPanel.setBounds (14, 96, 990, 500);
+    magic.setBounds (getLocalBounds());
+    if (welcome != nullptr) welcome->setBounds (getLocalBounds());
 
     mixSlider.setBounds (176, 632, 250, 30);
     outSlider.setBounds (620, 632, 250, 30);
@@ -222,7 +288,14 @@ void MainUI::paint (juce::Graphics& g)
         g.fillRoundedRectangle (pill, 11.0f);
         g.setColour (t.light ? juce::Colours::white : juce::Colour (0xff0b0a12));
         g.setFont (font (11.5f, true));
-        g.drawText (pro ? "AI PRO" : "AI LITE", pill, juce::Justification::centred);
+        g.drawText (proc.isBeatRole() ? "BEAT" : (pro ? "AI PRO" : "AI LITE"), pill, juce::Justification::centred);
+    }
+    if (! proc.isBeatRole())
+    {
+        const int beats = proc.getLinkedBeats();
+        g.setFont (font (10.5f, true));
+        g.setColour (beats > 0 ? t.accent : t.textDim.withAlpha (0.7f));
+        g.drawText (beats > 0 ? ru ("BEAT LINK: подключён") : ru ("BEAT LINK: нет"), 380, 6, 240, 14, juce::Justification::centred);
     }
 
     // panels
@@ -255,6 +328,14 @@ void MainUI::paint (juce::Graphics& g)
 
 void MainUI::refresh()
 {
+    if (proc.isBeatRole() != lastBeatRole) updateRoleVisibility();
+    const int ms = proc.getMagicState();
+    if (ms != EZVoiceFXAudioProcessor::MagicIdle && ! magic.isVisible() && magicVisible) magic.setVisible (true);
+    if (magic.isVisible()) magic.tick();
+    if (beatPanel.isVisible()) beatPanel.refresh();
+    const int beats = proc.getLinkedBeats();
+    if (beats != lastBeats) { lastBeats = beats; repaint (380, 4, 240, 20); }
+
     if (spectrum.isVisible()) spectrum.update();
     if (history.isVisible()) history.repaint();
     meter.repaint();

@@ -9,7 +9,9 @@ struct Suggestion
 {
     float denoise = 70.0f, gate = 40.0f, deess = 50.0f, deplosive = 50.0f, hum = 0.0f;
     bool humOn = false;
-    float snrDb = 0.0f, noiseFloor = -90.0f, speech = -30.0f;
+    float vox = 30.0f;
+    bool whisperOn = false;
+    float snrDb = 0.0f, noiseFloor = -90.0f, speech = -30.0f, lra = 8.0f, whisperShare = 0.0f;
 };
 
 class InputAnalyzer
@@ -117,6 +119,26 @@ public:
         const float hs = quiet > 0 ? (float) (humShare / quiet) : 0.0f;
         s.humOn = hs > 0.25f;
         s.hum = s.humOn ? 80.0f : 0.0f;
+
+        // dynamics of the voice (loudness range of voiced blocks) -> VOX amount
+        std::vector<float> vl;
+        int whispered = 0;
+        for (size_t i = 0; i < blocks.size(); ++i)
+        {
+            if (L[i] <= floorL + 10.0f) continue;
+            vl.push_back (L[i]);
+            const auto& b = blocks[i];
+            if (b.full > 1.0e-10f && b.hi / b.full > 0.35f && L[i] < speech - 8.0f) ++whispered;
+        }
+        if (vl.size() > 10)
+        {
+            std::sort (vl.begin(), vl.end());
+            s.lra = vl[vl.size() * 95 / 100] - vl[vl.size() * 10 / 100];
+            s.vox = interp (s.lra, 5.0f, 15.0f, 16.0f, 60.0f);
+            s.whisperShare = (float) whispered / (float) vl.size();
+            s.whisperOn = s.whisperShare > 0.25f;
+            if (s.whisperOn) { s.denoise = std::min (s.denoise, 60.0f); s.gate = std::min (s.gate, 20.0f); }
+        }
         return true;
     }
 

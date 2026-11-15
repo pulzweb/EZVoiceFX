@@ -99,6 +99,40 @@ struct Biquad
                          1.0 + alpha, -2.0 * cs, 1.0 - alpha);
     }
 
+    void setPeaking (double fs, double freq, double q, double gainDb) noexcept
+    {
+        freq = std::clamp (freq, 10.0, 0.45 * fs);
+        const double A = std::pow (10.0, gainDb / 40.0);
+        const double w0 = 2.0 * kPi * freq / fs;
+        const double cs = std::cos (w0), alpha = std::sin (w0) / (2.0 * q);
+        setCoefficients (1.0 + alpha * A, -2.0 * cs, 1.0 - alpha * A,
+                         1.0 + alpha / A, -2.0 * cs, 1.0 - alpha / A);
+    }
+
+    void setLowShelf (double fs, double freq, double gainDb) noexcept
+    {
+        freq = std::clamp (freq, 10.0, 0.45 * fs);
+        const double A = std::pow (10.0, gainDb / 40.0);
+        const double w0 = 2.0 * kPi * freq / fs;
+        const double cs = std::cos (w0), sq = 2.0 * std::sqrt (A) * std::sin (w0) / 2.0 * std::sqrt (2.0);
+        setCoefficients (A * ((A + 1.0) - (A - 1.0) * cs + sq), 2.0 * A * ((A - 1.0) - (A + 1.0) * cs),
+                         A * ((A + 1.0) - (A - 1.0) * cs - sq),
+                         (A + 1.0) + (A - 1.0) * cs + sq, -2.0 * ((A - 1.0) + (A + 1.0) * cs),
+                         (A + 1.0) + (A - 1.0) * cs - sq);
+    }
+
+    void setHighShelf (double fs, double freq, double gainDb) noexcept
+    {
+        freq = std::clamp (freq, 10.0, 0.45 * fs);
+        const double A = std::pow (10.0, gainDb / 40.0);
+        const double w0 = 2.0 * kPi * freq / fs;
+        const double cs = std::cos (w0), sq = 2.0 * std::sqrt (A) * std::sin (w0) / 2.0 * std::sqrt (2.0);
+        setCoefficients (A * ((A + 1.0) + (A - 1.0) * cs + sq), -2.0 * A * ((A - 1.0) + (A + 1.0) * cs),
+                         A * ((A + 1.0) + (A - 1.0) * cs - sq),
+                         (A + 1.0) - (A - 1.0) * cs + sq, 2.0 * ((A - 1.0) - (A + 1.0) * cs),
+                         (A + 1.0) - (A - 1.0) * cs - sq);
+    }
+
     // constant 0 dB peak band-pass (x - bandpass = notch)
     void setBandpass (double fs, double freq, double q) noexcept
     {

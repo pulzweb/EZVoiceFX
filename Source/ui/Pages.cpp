@@ -32,8 +32,9 @@ MainPage::MainPage (EZVoiceFXAudioProcessor& p)
     addCell (s, "AI Denoise", denoiseAmt, denoiseOn, ru ("Нейросеть убирает фоновый шум. 100% = максимальное подавление."));
     addCell (s, "De-Esser", deessAmt, deessOn, ru ("Приглушает резкие С, Ш, Щ только в момент их появления."));
     addCell (s, "De-Reverb", dereverbAmt, dereverbOn, ru ("Убирает отзвук комнаты. Больше 60% может звучать неестественно."));
+    addCell (s, "VOX", voxAmt, voxOn, ru ("Одна ручка плотности, как Renaissance Vox: выравнивает и уплотняет голос, громкость при этом не меняется."));
+    addCell (s, "Fit to Beat", fitAmt, fitOn, ru ("Врезает вокал в бит: убирает низ и бубнёж там, где бит плотный, добавляет разборчивости и воздуха. Лучше всего работает с Beat Link на бите."));
     addCell (s, "Auto-Level", levelTarget, levelOn, ru ("Целевая громкость каждой капы. -18 LUFS оставляет запас для дальнейшей обработки."));
-    addCell (s, "Limiter", limiterCeil, limiterOn, ru ("Потолок пиков с учётом межсэмпловых пиков (true peak)."));
 }
 
 void MainPage::refresh() { for (auto& c : cells) c->refresh(); }
@@ -59,12 +60,18 @@ LevelPage::LevelPage (EZVoiceFXAudioProcessor& p)
 {
     using namespace ParamIDs;
     auto& s = p.apvts;
-    addCell (s, "Target", levelTarget, levelOn, ru ("Целевая громкость вокала, LUFS."));
+    addCell (s, "Target", levelTarget, levelOn, ru ("Целевая громкость вокала, LUFS. Все капы приводятся к ней."));
     addCell (s, "Ceiling", limiterCeil, limiterOn, ru ("Потолок пиков лимитера (true peak)."));
 
     mode.addItemList ({ "Ride (auto)", "Learn (exact)" }, 1);
     addAndMakeVisible (mode);
     modeAtt = std::make_unique<APVTS::ComboBoxAttachment> (s, levelMode, mode);
+
+    group.addItemList ({ ru ("Группа: выкл"), ru ("Группа A"), ru ("Группа B"), ru ("Группа C"), ru ("Группа D") }, 1);
+    group.setTooltip (ru ("Экземпляры EZ Voice FX в одной группе анализируются вместе: нажали АНАЛИЗ в одном, замер идёт во всех. "
+                          "Все капы группы придут к одной громкости. Если плагин стоит на шине группы, обычный АНАЛИЗ выравнивает всю шину."));
+    addAndMakeVisible (group);
+    groupAtt = std::make_unique<APVTS::ComboBoxAttachment> (s, linkGroup, group);
 
     learn.setButtonText (ru ("АНАЛИЗ (LEARN)"));
     learn.setTooltip (ru ("Нажмите, проиграйте капу целиком и нажмите ещё раз."));
@@ -110,10 +117,12 @@ void LevelPage::resized()
     mode.setBounds (row.removeFromLeft (row.getWidth() / 2 - 6));
     row.removeFromLeft (12);
     learn.setBounds (row);
-    r.removeFromTop (10);
+    r.removeFromTop (8);
+    group.setBounds (r.removeFromTop (30).removeFromLeft (r.getWidth() / 2 - 6));
+    r.removeFromTop (6);
     autoLearn.setBounds (r.removeFromTop (26));
     assist.setBounds (r.removeFromTop (26));
-    r.removeFromTop (6);
+    r.removeFromTop (4);
     info.setBounds (r);
 }
 
@@ -129,7 +138,8 @@ void LevelPage::refresh()
     for (auto& c : cells) c->refresh();
     const bool learning = proc.isLearning();
     learn.setToggleState (learning, juce::dontSendNotification);
-    learn.setButtonText (learning ? ru ("СТОП И ПРИМЕНИТЬ") : ru ("АНАЛИЗ (LEARN)"));
+    const bool grouped = proc.apvts.getRawParameterValue (ParamIDs::linkGroup)->load() >= 0.5f;
+    learn.setButtonText (learning ? ru ("СТОП И ПРИМЕНИТЬ") : (grouped ? ru ("АНАЛИЗ ГРУППЫ") : ru ("АНАЛИЗ (LEARN)")));
 
     const bool learnMode = proc.apvts.getRawParameterValue (ParamIDs::levelMode)->load() >= 0.5f;
     const float target = proc.apvts.getRawParameterValue (ParamIDs::levelTarget)->load();
@@ -158,29 +168,33 @@ void LevelPage::refresh()
 
 //==============================================================================
 AdvancedPage::AdvancedPage (EZVoiceFXAudioProcessor& p)
-    : proc (p), mono (ru ("Стерео в моно")), matchBypass (ru ("Bypass с выравниванием громкости"))
+    : proc (p), mono (ru ("Стерео в моно")), matchBypass (ru ("Bypass с выравниванием громкости")),
+      whisper (ru ("Защита шёпота"))
 {
     using namespace ParamIDs;
     auto& s = p.apvts;
     addCell (s, "De-Ess Freq", deessFreq, nullptr, ru ("Частота, выше которой работает де-эссер. Мужской голос 4-6 кГц, женский 6-8 кГц."));
     addCell (s, "Room Size", roomSize, nullptr, ru ("Время отзвука комнаты для дереверба. Маленькая комната 0.3 с, большая 1 с и больше."));
 
-    engine.addItemList ({ "AI Pro (DeepFilterNet3)", "AI Lite (RNNoise)" }, 1);
+    engine.addItemList ({ ru ("Auto (по мощности ПК)"), "AI Pro (DeepFilterNet3)", ru ("AI Lite (RNNoise, эко)") }, 1);
     humFreq.addItemList ({ "Hum: Auto", "Hum: 50 Hz", "Hum: 60 Hz" }, 1);
     listen.addItemList ({ ru ("Слушать: результат"), ru ("Слушать: удалённое") }, 1);
     for (auto* c : { &engine, &humFreq, &listen }) addAndMakeVisible (*c);
-    engineAtt = std::make_unique<APVTS::ComboBoxAttachment> (s, denoiseEngine, engine);
+    engine.onChange = [this] { engineChosen(); };
     humAtt = std::make_unique<APVTS::ComboBoxAttachment> (s, ParamIDs::humFreq, humFreq);
     listenAtt = std::make_unique<APVTS::ComboBoxAttachment> (s, ParamIDs::listen, listen);
 
-    engine.setTooltip (ru ("AI Pro: DeepFilterNet3, лучшее качество. AI Lite: RNNoise, минимальная нагрузка."));
+    engine.setTooltip (ru ("Auto: плагин сам тестирует ПК и выбирает. AI Pro: DeepFilterNet3, лучшее качество. AI Lite: RNNoise, минимальная нагрузка."));
+    whisper.setTooltip (ru ("Для шёпота и очень тихих фраз: нейросеть не «съедает» слова, гейт и дыхание работают мягче."));
+    addAndMakeVisible (whisper);
+    whisperAtt = std::make_unique<APVTS::ButtonAttachment> (s, ParamIDs::whisper, whisper);
     listen.setTooltip (ru ("«Удалённое» позволяет услышать, что именно убирает плагин."));
     addAndMakeVisible (mono);
     addAndMakeVisible (matchBypass);
     monoAtt = std::make_unique<APVTS::ButtonAttachment> (s, ParamIDs::mono, mono);
     matchAtt = std::make_unique<APVTS::ButtonAttachment> (s, ParamIDs::matchBypass, matchBypass);
 
-    for (auto* l : { &status, &info })
+    for (auto* l : { &status, &info, &hardware })
     {
         l->setJustificationType (juce::Justification::topLeft);
         l->setFont (font (12.5f));
@@ -194,6 +208,7 @@ void AdvancedPage::lookAndFeelChanged()
     const auto& t = themeOf (*this);
     status.setColour (juce::Label::textColourId, t.accent);
     info.setColour (juce::Label::textColourId, t.textDim);
+    hardware.setColour (juce::Label::textColourId, t.textDim);
 }
 
 void AdvancedPage::resized()
@@ -208,15 +223,17 @@ void AdvancedPage::resized()
     auto col2 = r;
 
     engine.setBounds (col1.removeFromTop (30));
-    col1.removeFromTop (6);
-    status.setBounds (col1.removeFromTop (36));
+    col1.removeFromTop (4);
+    status.setBounds (col1.removeFromTop (34));
+    hardware.setBounds (col1.removeFromTop (70));
     humFreq.setBounds (col1.removeFromTop (30));
-    col1.removeFromTop (8);
+    col1.removeFromTop (6);
     listen.setBounds (col1.removeFromTop (30));
 
-    mono.setBounds (col2.removeFromTop (28));
-    matchBypass.setBounds (col2.removeFromTop (28));
-    col2.removeFromTop (8);
+    whisper.setBounds (col2.removeFromTop (26));
+    mono.setBounds (col2.removeFromTop (26));
+    matchBypass.setBounds (col2.removeFromTop (26));
+    col2.removeFromTop (6);
     info.setBounds (col2);
 }
 
@@ -227,9 +244,61 @@ void AdvancedPage::paint (juce::Graphics& g)
     drawPanel (g, b.toFloat(), themeOf (*this), 12.0f);
 }
 
+void AdvancedPage::setEngineParam (int index)
+{
+    if (auto* prm = proc.apvts.getParameter (ParamIDs::aiEngine))
+    {
+        prm->beginChangeGesture();
+        prm->setValueNotifyingHost (prm->convertTo0to1 ((float) index));
+        prm->endChangeGesture();
+    }
+}
+
+void AdvancedPage::engineChosen()
+{
+    const int idx = engine.getSelectedId() - 1;
+    if (idx < 0 || confirming) return;
+    const int current = juce::roundToInt (proc.apvts.getRawParameterValue (ParamIDs::aiEngine)->load());
+    if (idx == current) return;
+
+    if (idx == 1 && ! proc.isProRecommended())
+    {
+        // weak PC (or test not finished): ask for an explicit confirmation
+        confirming = true;
+        engine.setSelectedId (current + 1, juce::dontSendNotification);
+        auto* w = new juce::AlertWindow (ru ("Включить AI Pro?"),
+            ru ("Тест показал, что этот компьютер может не справиться с AI Pro в реальном времени.
+
+"
+                "Возможны щелчки, зависания и даже вылет DAW. Сохраните проект перед включением.
+
+"
+                "Включить AI Pro всё равно?"),
+            juce::MessageBoxIconType::WarningIcon);
+        w->addButton (ru ("Включить, проект сохранён"), 1);
+        w->addButton (ru ("Отмена"), 0, juce::KeyPress (juce::KeyPress::escapeKey));
+        auto* host = getParentComponent() != nullptr ? getParentComponent() : this;
+        host->addAndMakeVisible (w);
+        w->setCentrePosition (host->getWidth() / 2, host->getHeight() / 2);
+        juce::Component::SafePointer<AdvancedPage> safe (this);
+        w->enterModalState (true, juce::ModalCallbackFunction::create ([safe] (int r)
+        {
+            if (safe == nullptr) return;
+            safe->confirming = false;
+            if (r == 1) safe->setEngineParam (1);
+        }), true);
+        return;
+    }
+    setEngineParam (idx);
+}
+
 void AdvancedPage::refresh()
 {
     for (auto& c : cells) c->refresh();
+    const int cur = juce::roundToInt (proc.apvts.getRawParameterValue (ParamIDs::aiEngine)->load());
+    if (! confirming && engine.getSelectedId() != cur + 1) engine.setSelectedId (cur + 1, juce::dontSendNotification);
+    const auto hw = proc.getHardwareText();
+    if (hardware.getText() != hw) hardware.setText (hw, juce::dontSendNotification);
     const auto st = proc.getEngineStatus() + (proc.isProEngineActive() ? ru ("\nСейчас работает: AI Pro") : ru ("\nСейчас работает: AI Lite"));
     if (status.getText() != st) status.setText (st, juce::dontSendNotification);
 
