@@ -211,6 +211,11 @@ void SidebarTab::paintButton (juce::Graphics& g, bool highlighted, bool)
             g.fillRoundedRectangle (cx - s * 0.22f, cy - s * 0.9f, s * 0.45f, s * 1.7f, 1.5f);
             g.fillRoundedRectangle (cx + s * 0.55f, cy - s * 0.5f, s * 0.45f, s * 1.3f, 1.5f);
             break;
+        case Icon::Reference:
+            g.drawEllipse (cx - s, cy - s, s * 2.0f, s * 2.0f, 1.8f);
+            g.drawEllipse (cx - s * 0.55f, cy - s * 0.55f, s * 1.1f, s * 1.1f, 1.8f);
+            g.fillEllipse (cx - s * 0.18f, cy - s * 0.18f, s * 0.36f, s * 0.36f);
+            break;
         case Icon::Advanced:
             for (int i = 0; i < 8; ++i)
             {
@@ -229,9 +234,20 @@ void SidebarTab::paintButton (juce::Graphics& g, bool highlighted, bool)
 
 //==============================================================================
 KnobCell::KnobCell (APVTS& s, const juce::String& t, const char* knobId, const char* powerId,
-                    const juce::String& tooltip)
+                    const juce::String& tooltip, const char* modeId,
+                    const juce::String& modeText, const juce::String& modeTip)
     : title (t)
 {
+    if (modeId != nullptr)
+    {
+        hasMode = true;
+        mode.setButtonText (modeText);
+        mode.setTooltip (modeTip);
+        mode.setClickingTogglesState (true);
+        addAndMakeVisible (mode);
+        modeAtt = std::make_unique<APVTS::ButtonAttachment> (s, modeId, mode);
+    }
+
     knob.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
     knob.setRotaryParameters (juce::MathConstants<float>::pi * 1.25f, juce::MathConstants<float>::pi * 2.75f, true);
     knob.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
@@ -253,16 +269,17 @@ KnobCell::KnobCell (APVTS& s, const juce::String& t, const char* knobId, const c
 void KnobCell::resized()
 {
     const int w = getWidth(), h = getHeight();
-    const int ks = juce::jmax (40, juce::jmin (w - 16, h - 52));
+    const int ks = juce::jmax (40, juce::jmin (w - 16, h - (hasMode ? 76 : 52)));
     knob.setBounds ((w - ks) / 2, 2, ks, ks);
     power.setBounds ((w + ks) / 2 - 12, 0, 24, 24);
+    if (hasMode) mode.setBounds (w / 2 - 36, ks + 46, 72, 22);
 }
 
 void KnobCell::paint (juce::Graphics& g)
 {
     const auto& t = themeOf (*this);
     const int w = getWidth(), h = getHeight();
-    const int ks = juce::jmax (40, juce::jmin (w - 16, h - 52));
+    const int ks = juce::jmax (40, juce::jmin (w - 16, h - (hasMode ? 76 : 52)));
     const bool on = ! hasPower || power.getToggleState();
     g.setColour (on ? t.text : t.textDim);
     g.setFont (font (14.0f, true));
@@ -489,6 +506,77 @@ void HistoryView::paint (juce::Graphics& g)
     g.setFont (font (10.5f, true));
     g.drawText (juce::String::fromUTF8 ("ГРОМКОСТЬ НА ВЫХОДЕ, 30 С  |  ЦЕЛЬ ") + juce::String (target, 1) + " LUFS",
                 8, 6, 400, 12, juce::Justification::left);
+}
+
+//==============================================================================
+void ProfileView::paint (juce::Graphics& g)
+{
+    const auto& t = themeOf (*this);
+    const float w = (float) getWidth(), h = (float) getHeight();
+    const char* labels[] = { "100", "200", "400", "800", "1.6k", "3.2k", "5k", "8k", "11k", "15k" };
+    const int N = ez::kMatchBands;
+    const float colW = w / (float) N;
+    auto yFor = [h] (float db) { return juce::jlimit (8.0f, h - 22.0f, (h - 22.0f) * 0.5f - db * (h - 30.0f) / 48.0f); };
+
+    g.setColour (t.border.withAlpha (0.35f));
+    g.drawHorizontalLine ((int) yFor (0.0f), 0.0f, w);
+    g.setFont (font (10.0f));
+    for (float d : { 12.0f, -12.0f })
+    {
+        g.setColour (t.border.withAlpha (0.2f));
+        g.drawHorizontalLine ((int) yFor (d), 0.0f, w);
+        g.setColour (t.textDim);
+        g.drawText ((d > 0 ? "+" : "") + juce::String ((int) d) + " dB", 4, (int) yFor (d) - 12, 50, 11, juce::Justification::left);
+    }
+
+    const bool refOk = proc.meters.refValid.load(), ownOk = proc.meters.profileValid.load();
+    // Match EQ gains as bars
+    for (int b = 0; b < N; ++b)
+    {
+        const float gdb = proc.meters.matchGains[b].load();
+        const float x = colW * (float) b + colW * 0.3f, y0 = yFor (0.0f), y1 = yFor (gdb * 3.0f);
+        g.setColour (t.accent.withAlpha (0.35f));
+        g.fillRoundedRectangle (x, std::min (y0, y1), colW * 0.4f, std::abs (y1 - y0) + 1.0f, 3.0f);
+        g.setColour (t.textDim);
+        g.drawText (labels[b], (int) (colW * (float) b), (int) h - 16, (int) colW, 12, juce::Justification::centred);
+        if (std::abs (gdb) > 0.2f)
+        {
+            g.setColour (t.text);
+            g.drawText ((gdb > 0 ? "+" : "") + juce::String (gdb, 1), (int) (colW * (float) b), (int) std::min (y0, y1) - 14, (int) colW, 12,
+                        juce::Justification::centred);
+        }
+    }
+
+    auto curve = [&] (std::atomic<float>* arr, juce::Colour col, float thick)
+    {
+        juce::Path p;
+        for (int b = 0; b < N; ++b)
+        {
+            const float x = colW * ((float) b + 0.5f), y = yFor (arr[b].load());
+            if (b == 0) p.startNewSubPath (x, y); else p.lineTo (x, y);
+        }
+        g.setColour (col.withAlpha (0.25f));
+        g.strokePath (p, juce::PathStrokeType (thick + 4.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        g.setColour (col);
+        g.strokePath (p, juce::PathStrokeType (thick, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        for (int b = 0; b < N; ++b) g.fillEllipse (colW * ((float) b + 0.5f) - 3.5f, yFor (arr[b].load()) - 3.5f, 7.0f, 7.0f);
+    };
+    if (ownOk) curve (proc.meters.vocalProfile, t.textDim, 1.6f);
+    if (refOk) curve (proc.meters.refBands, t.accent2, 2.4f);
+
+    g.setFont (font (10.5f, true));
+    g.setColour (t.accent2);
+    g.drawText (juce::String::fromUTF8 ("РЕФЕРЕНС"), 8, 6, 90, 12, juce::Justification::left);
+    g.setColour (t.textDim);
+    g.drawText (juce::String::fromUTF8 ("ВАШ ВОКАЛ"), 92, 6, 90, 12, juce::Justification::left);
+    g.setColour (t.accent);
+    g.drawText ("MATCH EQ", 184, 6, 90, 12, juce::Justification::left);
+    if (! refOk)
+    {
+        g.setColour (t.textDim);
+        g.setFont (font (14.0f));
+        g.drawText (juce::String::fromUTF8 ("Загрузите референс, чтобы увидеть тембр"), getLocalBounds(), juce::Justification::centred);
+    }
 }
 
 //==============================================================================

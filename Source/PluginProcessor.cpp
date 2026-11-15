@@ -70,6 +70,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout EZVoiceFXAudioProcessor::cre
     layout.add (unitParam (deessFreq, "De-ess Freq", 3000.0f, 10000.0f, 10.0f, 5500.0f, 5500.0f, hz));
     layout.add (boolParam (voxOn, "VOX On", true));
     layout.add (percentParam (voxAmt, "VOX", 25.0f));
+    layout.add (choiceParam (voxMode, "VOX Mode", { "Density", "Loud (RVox)" }, 0));
     layout.add (boolParam (fitOn, "Fit to Beat On", true));
     layout.add (percentParam (fitAmt, "Fit to Beat", 50.0f));
     layout.add (boolParam (levelOn, "Auto-Level On", true));
@@ -88,6 +89,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout EZVoiceFXAudioProcessor::cre
     layout.add (choiceParam (listen, "Listen", { "Output", "Removed" }, 0));
     layout.add (choiceParam (role, "Role", { "Vocal", "Beat Link" }, 0));
     layout.add (percentParam (unmaskAmt, "Beat Unmask", 40.0f));
+    layout.add (boolParam (balOn, "Balance To Beat", false));
+    layout.add (unitParam (balDb, "Vocal vs Beat", -12.0f, 6.0f, 0.1f, 0.0f, 0.0f, db1));
+    layout.add (boolParam (matchOn, "Match EQ On", false));
+    layout.add (percentParam (matchAmt, "Match EQ", 60.0f));
+    layout.add (choiceParam (refMode, "Reference Mode", { "Auto", "Precise", "Fast", "Acapella" }, 0));
+    layout.add (boolParam (refGpu, "Reference GPU", true));
     layout.add (boolParam (bypass, "Bypass", false));
     return layout;
 }
@@ -165,6 +172,10 @@ void EZVoiceFXAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBl
     fit.prepare (fs);
     unmask.prepare (fs);
     bandMeter.prepare (fs);
+    profiler.prepare (fs);
+    matchEq.prepare (fs);
+    balance.prepare (fs);
+    beatTracker.prepare (fs);
     autoLevel.prepare (fs);
     limiter.prepare (fs);
     outMeter.prepare (fs);
@@ -204,7 +215,12 @@ void EZVoiceFXAudioProcessor::processBeatRole (float* const* ch, int nch, int n)
     for (int i = 0; i < n; ++i) bandMeter.process (monoScratch[(size_t) i]);
     float bands[ez::LinkHub::kBands], vb[ez::LinkHub::kBands];
     bandMeter.getRms (bands);
-    hub.publish (hubSlot, ez::LinkHub::Beat, bands, inMeter.getLufs());
+    {
+        const float* d[2] = { dryScratch[0].data(), dryScratch[nch > 1 ? 1 : 0].data() };
+        beatTracker.process (d, nch, n);
+    }
+    hub.publish (hubSlot, ez::LinkHub::Beat, bands, beatTracker.getLufs());
+    meters.beatLufs.store (beatTracker.getLufs());
 
     const int vocals = hub.gather (ez::LinkHub::Vocal, hubSlot, vb);
     unmask.computeTargets (param (ParamIDs::unmaskAmt) * 0.01f, vocals, vb, bands);
@@ -385,8 +401,13 @@ void EZVoiceFXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
         float pub[ez::LinkHub::kBands];
         for (int b = 0; b < ez::LinkHub::kBands; ++b) pub[b] = vad > 0.3f ? bands[b] : 0.0f;
         hub.publish (hubSlot, ez::LinkHub::Vocal, pub, outMeter.getLufs());
-        const int beats = hub.gather (ez::LinkHub::Beat, hubSlot, beatBands);
+        float beatLufs = -70.0f;
+        const int beats = hub.gather (ez::LinkHub::Beat, hubSlot, beatBands, &beatLufs);
         linkedBeats.store (beats);
+        const bool balanceOn = flag (balOn);
+        const float balOffset = param (balDb);
+        if (balanceOn && beats > 0 && beatLufs > -60.0f)
+            autoLevel.setParams (flag (levelOn), juce::jlimit (-30.0f, -6.0f, beatLufs + balOffset), learnMode);
         linkedVocals.store (hub.countRole (ez::LinkHub::Vocal));
 
         // ---- 1. low cut ----
@@ -452,15 +473,40 @@ void EZVoiceFXAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, ju
                     ch[c][i] += dl * ((cleanScratch[c][(size_t) i] - ch[c][i]) - ch[c][i]);
             }
 
-        // ---- 10. VOX, 11. Fit to Beat ----
+        // ---- 10. VOX (Density mode sits here), 11. Fit to Beat ----
+        const bool voxLoud = param (voxMode) >= 0.5f;
         vox.setAmount (aVox);
-        vox.process (ch, nch, n);
+        vox.setLoud (voxLoud);
+        if (! voxLoud) vox.process (ch, nch, n);
         fit.computeTargets (aFit, beats > 0, beatBands, bands);
         for (int c = 0; c < nch; ++c)
             for (int i = 0; i < n; ++i) ch[c][i] = fit.processSample (c, ch[c][i]);
 
-        // ---- 12. auto-level, output trim, 13. true-peak limiter ----
+        // ---- 11b. Match EQ towards the reference vocal tone ----
+        for (int i = 0; i < n; ++i)
+        {
+            float m = 0.0f;
+            for (int c = 0; c < nch; ++c) m += ch[c][i];
+            monoScratch[(size_t) i] = m / (float) nch;
+        }
+        profiler.process (monoScratch.data(), n, vad > 0.5f);
+        float own[ez::kMatchBands], refB[ez::kMatchBands];
+        profiler.getProfile (own);
+        const bool refOk = meters.refValid.load();
+        for (int b = 0; b < ez::kMatchBands; ++b) refB[b] = meters.refBands[b].load();
+        matchEq.computeTargets (flag (matchOn) ? param (matchAmt) * 0.01f : 0.0f, refOk, refB, profiler.hasProfile(), own);
+        for (int c = 0; c < nch; ++c)
+            for (int i = 0; i < n; ++i) ch[c][i] = matchEq.processSample (c, ch[c][i]);
+        for (int b = 0; b < ez::kMatchBands; ++b) { meters.vocalProfile[b].store (own[b]); meters.matchGains[b].store (matchEq.getGain (b)); }
+        meters.profileValid.store (profiler.hasProfile());
+
+        // ---- 12. auto-level, (VOX Loud mode after it, like RVox), output trim, 13. true-peak limiter ----
         autoLevel.process (ch, nch, n);
+        if (voxLoud) vox.process (ch, nch, n);
+        balance.process (ch, nch, n, balanceOn, beats > 0 && beatLufs > -60.0f, beatLufs, balOffset);
+        meters.beatLufs.store (beatLufs);
+        meters.vocalLufs.store (balance.getVocalLufs());
+        meters.balanceTrimDb.store (balance.getTrimDb());
         for (int i = 0; i < n; ++i)
         {
             const float g = outGainSm.getNextValue();
@@ -591,6 +637,8 @@ void EZVoiceFXAudioProcessor::handleAsyncUpdate()
             setParam (fitAmt, beatSeen ? 60.0f : 30.0f);
             setParam (levelOn, 1.0f);
             setParam (levelMode, 1.0f);
+            const bool hasRef = meters.refValid.load();
+            if (hasRef) applyReference();
 
             summary << ru ("Шум убран: Denoise ") << juce::roundToInt (s.denoise) << "%, Gate " << juce::roundToInt (s.gate) << "%\n"
                     << ru ("Сибилянты: De-ess ") << juce::roundToInt (s.deess) << "%,  " << ru ("взрывные: ") << juce::roundToInt (s.deplosive) << "%\n"
@@ -598,6 +646,7 @@ void EZVoiceFXAudioProcessor::handleAsyncUpdate()
                     << (s.whisperOn ? ru ("Найден шёпот: включена защита шёпота\n") : juce::String())
                     << (s.humOn ? ru ("Найден сетевой гул: включено подавление\n") : juce::String())
                     << (beatSeen ? ru ("Бит найден: вокал врезается в бит (Fit 60%)\n") : ru ("Бит не найден: мягкая полировка (Fit 30%)\n"))
+                    << (hasRef ? ru ("Референс применён: тембр (Match EQ) и баланс с битом\n") : juce::String())
                     << ru ("Громкость: ") << (hasLearned() ? juce::String (getLearnedLufs(), 1) + " -> " + juce::String (param (levelTarget), 1) + " LUFS"
                                                          : ru ("замер не удался"));
         }
@@ -622,7 +671,8 @@ void EZVoiceFXAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     auto state = apvts.copyState();
     state.setProperty ("learnedLufs", (double) autoLevel.getLearnedLufs(), nullptr);
     state.setProperty ("learnedValid", autoLevel.hasLearned(), nullptr);
-    state.setProperty ("version", "1.2.0", nullptr);
+    state.setProperty ("version", "1.3.0", nullptr);
+    state.setProperty ("refProfile", getReferenceProfile().toString(), nullptr);
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
 }
@@ -636,10 +686,65 @@ void EZVoiceFXAudioProcessor::setStateInformation (const void* data, int sizeInB
             auto tree = juce::ValueTree::fromXml (*xml);
             const float lufs = (float) (double) tree.getProperty ("learnedLufs", -18.0);
             const bool valid = (bool) tree.getProperty ("learnedValid", false);
+            const auto refStr = tree.getProperty ("refProfile", "").toString();
             apvts.replaceState (tree);
             autoLevel.setLearned (lufs, valid);
+            setReferenceProfile (ez::ReferenceProfile::fromString (refStr));
         }
     }
+}
+
+//==============================================================================
+void EZVoiceFXAudioProcessor::setReferenceProfile (const ez::ReferenceProfile& p)
+{
+    {
+        const juce::ScopedLock sl (reportLock);
+        refProfile = p;
+    }
+    for (int b = 0; b < ez::kMatchBands; ++b) meters.refBands[b].store (p.bands[b]);
+    meters.refValid.store (p.valid);
+}
+
+void EZVoiceFXAudioProcessor::startReference (const juce::File& f)
+{
+    const int mode = juce::roundToInt (param (ParamIDs::refMode));
+    refAnalyzer.startAnalysis (f, (ez::ReferenceAnalyzer::Mode) juce::jlimit (0, 3, mode), flag (ParamIDs::refGpu));
+}
+
+void EZVoiceFXAudioProcessor::pollReference()
+{
+    ez::ReferenceProfile p;
+    if (refAnalyzer.takeResult (p))
+    {
+        setReferenceProfile (p);
+        applyReference();
+    }
+}
+
+void EZVoiceFXAudioProcessor::applyReference()
+{
+    using namespace ParamIDs;
+    const auto p = getReferenceProfile();
+    if (! p.valid) return;
+    setParam (matchOn, 1.0f);
+    setParam (matchAmt, p.approximate ? 40.0f : 70.0f);
+    if (p.balanceValid)
+    {
+        setParam (balOn, 1.0f);
+        setParam (balDb, juce::jlimit (-12.0f, 6.0f, std::round (p.balanceDb * 10.0f) / 10.0f));
+    }
+    // denser reference vocal (small loudness range) -> more VOX
+    setParam (voxOn, 1.0f);
+    setParam (voxAmt, std::round (juce::jlimit (15.0f, 60.0f, 60.0f - (p.lra - 4.0f) * 5.6f)));
+    // more sibilant reference -> a bit less de-essing, and the other way round
+    setParam (deessAmt, std::round (juce::jlimit (25.0f, 75.0f, 70.0f - p.sibilance * 150.0f)));
+}
+
+void EZVoiceFXAudioProcessor::clearReference()
+{
+    setReferenceProfile (ez::ReferenceProfile());
+    setParam (ParamIDs::matchOn, 0.0f);
+    setParam (ParamIDs::balOn, 0.0f);
 }
 
 juce::AudioProcessorEditor* EZVoiceFXAudioProcessor::createEditor()

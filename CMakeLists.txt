@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(EZVoiceFX VERSION 1.2.0 LANGUAGES C CXX)
+project(EZVoiceFX VERSION 1.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,7 +61,9 @@ target_sources(EZVoiceFX PRIVATE
     Source/Presets.cpp
     Source/ui/Widgets.cpp
     Source/ui/Pages.cpp
-    Source/ui/Magic.cpp)
+    Source/ui/Magic.cpp
+    Source/ref/OrtEngine.cpp
+    Source/ref/Reference.cpp)
 
 target_include_directories(EZVoiceFX PRIVATE Source)
 
@@ -70,7 +72,18 @@ target_compile_definitions(EZVoiceFX PUBLIC
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
     JUCE_DISPLAY_SPLASH_SCREEN=0
-    JUCE_REPORT_APP_USAGE=0)
+    JUCE_REPORT_APP_USAGE=0
+    JUCE_USE_MP3AUDIOFORMAT=1)
+
+# ---------------------------------------------- vocal separation (ONNX Runtime)
+set(EZ_ORT_INCLUDE "" CACHE PATH "Folder with onnxruntime_c_api.h")
+if(EZ_ORT_INCLUDE AND EXISTS "${EZ_ORT_INCLUDE}/onnxruntime_c_api.h")
+    target_include_directories(EZVoiceFX PRIVATE "${EZ_ORT_INCLUDE}")
+    target_compile_definitions(EZVoiceFX PRIVATE EZ_HAS_ORT=1)
+    message(STATUS "EZ Voice FX: vocal separation engine ENABLED (${EZ_ORT_INCLUDE})")
+else()
+    message(STATUS "EZ Voice FX: vocal separation engine disabled (no ONNX Runtime headers)")
+endif()
 
 if(MSVC)
     target_compile_options(EZVoiceFX PRIVATE /utf-8 /bigobj)

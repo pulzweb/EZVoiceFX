@@ -5,7 +5,7 @@ static juce::String ru (const char* s) { return juce::String::fromUTF8 (s); }
 
 //==============================================================================
 MainUI::MainUI (EZVoiceFXAudioProcessor& p, ezui::EZLookAndFeel& l)
-    : proc (p), lnf (l), presets (p.apvts), spectrum (p), history (p), meter (p), magic (p), beatPanel (p)
+    : proc (p), lnf (l), presets (p.apvts), spectrum (p), history (p), meter (p), profileView (p), magic (p), beatPanel (p)
 {
     auto& s = p.apvts;
 
@@ -30,8 +30,8 @@ MainUI::MainUI (EZVoiceFXAudioProcessor& p, ezui::EZLookAndFeel& l)
     magicBtn.setToggleState (true, juce::dontSendNotification);     // drawn with the accent gradient
 
     // ---- sidebar ----
-    ezui::SidebarTab* tabs[] = { &tabMain, &tabClean, &tabLevel, &tabAdv };
-    for (int i = 0; i < 4; ++i)
+    ezui::SidebarTab* tabs[] = { &tabMain, &tabClean, &tabLevel, &tabRef, &tabAdv };
+    for (int i = 0; i < kPages; ++i)
     {
         tabs[i]->onClick = [this, i] { selectPage (i); };
         addAndMakeVisible (*tabs[i]);
@@ -40,11 +40,13 @@ MainUI::MainUI (EZVoiceFXAudioProcessor& p, ezui::EZLookAndFeel& l)
     // ---- display + pages ----
     addAndMakeVisible (spectrum);
     addChildComponent (history);
+    addChildComponent (profileView);
     addAndMakeVisible (meter);
     pages[0] = std::make_unique<ezui::MainPage> (p);
     pages[1] = std::make_unique<ezui::CleanPage> (p);
     pages[2] = std::make_unique<ezui::LevelPage> (p);
-    pages[3] = std::make_unique<ezui::AdvancedPage> (p);
+    pages[3] = std::make_unique<ezui::RefPage> (p);
+    pages[4] = std::make_unique<ezui::AdvancedPage> (p);
     for (auto& pg : pages) addChildComponent (*pg);
 
     // ---- bottom bar ----
@@ -122,10 +124,16 @@ void MainUI::updateRoleVisibility()
     lastBeatRole = beat;
     beatPanel.setVisible (beat);
     for (auto* c : { (juce::Component*) &tabMain, (juce::Component*) &tabClean, (juce::Component*) &tabLevel,
-                     (juce::Component*) &tabAdv, (juce::Component*) &spectrum, (juce::Component*) &history })
+                     (juce::Component*) &tabRef, (juce::Component*) &tabAdv, (juce::Component*) &spectrum,
+                     (juce::Component*) &history, (juce::Component*) &profileView })
         c->setVisible (! beat);
-    for (int i = 0; i < 4; ++i) pages[i]->setVisible (! beat && i == currentPage);
-    if (! beat) { history.setVisible (currentPage == 2); spectrum.setVisible (currentPage != 2); }
+    for (int i = 0; i < kPages; ++i) pages[i]->setVisible (! beat && i == currentPage);
+    if (! beat)
+    {
+        history.setVisible (currentPage == 2);
+        profileView.setVisible (currentPage == 3);
+        spectrum.setVisible (currentPage != 2 && currentPage != 3);
+    }
     listenBtn.setVisible (! beat);
     magicBtn.setVisible (! beat);
     repaint();
@@ -133,15 +141,16 @@ void MainUI::updateRoleVisibility()
 
 void MainUI::selectPage (int index)
 {
-    currentPage = juce::jlimit (0, 3, index);
-    ezui::SidebarTab* tabs[] = { &tabMain, &tabClean, &tabLevel, &tabAdv };
-    for (int i = 0; i < 4; ++i)
+    currentPage = juce::jlimit (0, kPages - 1, index);
+    ezui::SidebarTab* tabs[] = { &tabMain, &tabClean, &tabLevel, &tabRef, &tabAdv };
+    for (int i = 0; i < kPages; ++i)
     {
         tabs[i]->setToggleState (i == currentPage, juce::dontSendNotification);
         pages[i]->setVisible (i == currentPage);
     }
     history.setVisible (currentPage == 2);
-    spectrum.setVisible (currentPage != 2);
+    profileView.setVisible (currentPage == 3);
+    spectrum.setVisible (currentPage != 2 && currentPage != 3);
     proc.setUiProperty ("page", currentPage);
 }
 
@@ -193,7 +202,7 @@ void MainUI::showSettingsMenu()
         sizeMenu.addItem (200 + i, juce::String (juce::roundToInt (sizes[i] * 100.0f)) + " %", true,
                           std::abs (sizes[i] - currentScale) < 0.01f);
 
-    menu.addSectionHeader ("EZ Voice FX 1.2");
+    menu.addSectionHeader ("EZ Voice FX 1.3");
     menu.addSubMenu (ru ("Тема оформления"), themeMenu);
     menu.addSubMenu (ru ("Размер окна"), sizeMenu);
     menu.addSeparator();
@@ -223,11 +232,13 @@ void MainUI::resized()
     tabMain.setBounds (20, 104, 76, 74);
     tabClean.setBounds (20, 184, 76, 74);
     tabLevel.setBounds (20, 264, 76, 74);
-    tabAdv.setBounds (20, 344, 76, 74);
+    tabRef.setBounds (20, 344, 76, 74);
+    tabAdv.setBounds (20, 424, 76, 74);
 
     const juce::Rectangle<int> display (126, 108, 864, 196);
     spectrum.setBounds (display);
     history.setBounds (display);
+    profileView.setBounds (display);
     for (auto& pg : pages) pg->setBounds (112, 316, 892, 272);
     meter.setBounds (1024, 108, 60, 470);
 
@@ -338,6 +349,8 @@ void MainUI::refresh()
 
     if (spectrum.isVisible()) spectrum.update();
     if (history.isVisible()) history.repaint();
+    if (profileView.isVisible()) profileView.repaint();
+    if (currentPage != 3) proc.pollReference();          // results also arrive while another tab is open
     meter.repaint();
     pages[currentPage]->refresh();
 

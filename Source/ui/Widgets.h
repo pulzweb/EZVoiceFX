@@ -36,7 +36,8 @@ class KnobCell : public juce::Component
 {
 public:
     KnobCell (APVTS& s, const juce::String& title, const char* knobId, const char* powerId,
-              const juce::String& tooltip);
+              const juce::String& tooltip, const char* modeId = nullptr,
+              const juce::String& modeText = {}, const juce::String& modeTip = {});
     void paint (juce::Graphics&) override;
     void resized() override;
     void refresh();
@@ -45,10 +46,11 @@ private:
     juce::String title;
     juce::Slider knob;
     juce::ToggleButton power;
-    bool hasPower = false, lastOn = true;
+    juce::TextButton mode;
+    bool hasPower = false, hasMode = false, lastOn = true;
     juce::String lastText;
     std::unique_ptr<APVTS::SliderAttachment> knobAtt;
-    std::unique_ptr<APVTS::ButtonAttachment> powerAtt;
+    std::unique_ptr<APVTS::ButtonAttachment> powerAtt, modeAtt;
 };
 
 //==============================================================================
@@ -83,6 +85,18 @@ private:
 };
 
 //==============================================================================
+// Reference vs own vocal tone (10 bands) and the Match EQ curve
+class ProfileView : public juce::Component
+{
+public:
+    explicit ProfileView (EZVoiceFXAudioProcessor& p) : proc (p) {}
+    void paint (juce::Graphics&) override;
+
+private:
+    EZVoiceFXAudioProcessor& proc;
+};
+
+//==============================================================================
 class OutputMeter : public juce::Component
 {
 public:
@@ -97,7 +111,7 @@ private:
 class SidebarTab : public juce::Button
 {
 public:
-    enum class Icon { Main, Clean, Level, Advanced };
+    enum class Icon { Main, Clean, Level, Reference, Advanced };
     SidebarTab (const juce::String& name, Icon i) : juce::Button (name), icon (i) { setClickingTogglesState (false); }
     void paintButton (juce::Graphics&, bool highlighted, bool down) override;
 

@@ -5,9 +5,10 @@ namespace ezui
 static juce::String ru (const char* s) { return juce::String::fromUTF8 (s); }
 
 //==============================================================================
-void Page::addCell (APVTS& s, const juce::String& title, const char* knob, const char* power, const juce::String& tip)
+void Page::addCell (APVTS& s, const juce::String& title, const char* knob, const char* power, const juce::String& tip,
+                    const char* modeId, const juce::String& modeText, const juce::String& modeTip)
 {
-    cells.push_back (std::make_unique<KnobCell> (s, title, knob, power, tip));
+    cells.push_back (std::make_unique<KnobCell> (s, title, knob, power, tip, modeId, modeText, modeTip));
     addAndMakeVisible (*cells.back());
 }
 
@@ -32,7 +33,11 @@ MainPage::MainPage (EZVoiceFXAudioProcessor& p)
     addCell (s, "AI Denoise", denoiseAmt, denoiseOn, ru ("Нейросеть убирает фоновый шум. 100% = максимальное подавление."));
     addCell (s, "De-Esser", deessAmt, deessOn, ru ("Приглушает резкие С, Ш, Щ только в момент их появления."));
     addCell (s, "De-Reverb", dereverbAmt, dereverbOn, ru ("Убирает отзвук комнаты. Больше 60% может звучать неестественно."));
-    addCell (s, "VOX", voxAmt, voxOn, ru ("Одна ручка плотности, как Renaissance Vox: выравнивает и уплотняет голос, громкость при этом не меняется."));
+    addCell (s, "VOX", voxAmt, voxOn,
+             ru ("Одна ручка компрессии вокала. Обычный режим: голос плотнее, громкость та же. "
+                 "Режим RVOX (кнопка под ручкой): как Renaissance Vox, голос и плотнее, и громче."),
+             voxMode, "RVOX", ru ("Вкл: VOX работает как Renaissance Vox, делает голос громче и плотнее (после автогромкости). "
+                                 "Выкл: только плотнее, громкость не меняется."));
     addCell (s, "Fit to Beat", fitAmt, fitOn, ru ("Врезает вокал в бит: убирает низ и бубнёж там, где бит плотный, добавляет разборчивости и воздуха. Лучше всего работает с Beat Link на бите."));
     addCell (s, "Auto-Level", levelTarget, levelOn, ru ("Целевая громкость каждой капы. -18 LUFS оставляет запас для дальнейшей обработки."));
 }
@@ -163,6 +168,147 @@ void LevelPage::refresh()
 
     const auto rep = proc.getAssistantReport();
     if (rep.isNotEmpty()) txt << "\n\n" << ru ("Ассистент:\n") << rep;
+    if (info.getText() != txt) info.setText (txt, juce::dontSendNotification);
+}
+
+//==============================================================================
+RefPage::RefPage (EZVoiceFXAudioProcessor& p) : proc (p), gpu (ru ("Использовать видеокарту"))
+{
+    using namespace ParamIDs;
+    auto& s = p.apvts;
+    addCell (s, "Vocal / Beat", balDb, balOn,
+             ru ("Насколько вокал громче (+) или тише (-) бита. Работает, когда на бите стоит EZ Voice FX в режиме Beat Link. "
+                 "Референс выставляет это значение сам."));
+    addCell (s, "Match EQ", matchAmt, matchOn, ru ("Подгоняет тембр вашего вокала под вокал референса. 100% = полностью как в референсе."));
+
+    loadBtn.setButtonText (ru ("ЗАГРУЗИТЬ РЕФЕРЕНС..."));
+    loadBtn.setTooltip (ru ("Готовая песня (WAV, MP3, FLAC, AIFF, OGG). Плагин вытащит из неё голос и сравнит с вашим."));
+    loadBtn.onClick = [this]
+    {
+        chooser = std::make_unique<juce::FileChooser> (ru ("Выберите референс"),
+                                                       juce::File::getSpecialLocation (juce::File::userMusicDirectory),
+                                                       "*.wav;*.mp3;*.flac;*.aif;*.aiff;*.ogg");
+        juce::Component::SafePointer<RefPage> safe (this);
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                              [safe] (const juce::FileChooser& fc)
+                              {
+                                  if (safe == nullptr) return;
+                                  const auto f = fc.getResult();
+                                  if (f.existsAsFile()) safe->proc.startReference (f);
+                              });
+    };
+    applyBtn.setButtonText (ru ("ПРИМЕНИТЬ СНОВА"));
+    applyBtn.setTooltip (ru ("Заново выставить баланс, Match EQ, VOX и де-эссер по референсу."));
+    applyBtn.onClick = [this] { proc.applyReference(); };
+    cancelBtn.setButtonText (ru ("ОТМЕНА"));
+    cancelBtn.onClick = [this] { proc.cancelReference(); };
+    clearBtn.setButtonText (ru ("УБРАТЬ"));
+    clearBtn.setTooltip (ru ("Забыть референс и выключить Match EQ и баланс с битом."));
+    clearBtn.onClick = [this] { proc.clearReference(); };
+    for (auto* b : { &loadBtn, &applyBtn, &cancelBtn, &clearBtn }) addAndMakeVisible (*b);
+
+    mode.addItemList ({ ru ("Авто: нейросеть, если ПК справится"), ru ("Точно: всегда нейросеть"),
+                        ru ("Быстро: без нейросети (примерно)"), ru ("Референс - акапелла") }, 1);
+    mode.setTooltip (ru ("Авто: на слабом ПК плагин сам переключится на быстрый режим, если отделение голоса займёт больше ~1 минуты."));
+    addAndMakeVisible (mode);
+    modeAtt = std::make_unique<APVTS::ComboBoxAttachment> (s, refMode, mode);
+    gpu.setTooltip (ru ("Отделение голоса на видеокарте (DirectML) в 5-10 раз быстрее. Выключите, если видеокарта старая или драйвер глючит."));
+    addAndMakeVisible (gpu);
+    gpuAtt = std::make_unique<APVTS::ButtonAttachment> (s, refGpu, gpu);
+
+    for (auto* l : { &status, &info })
+    {
+        l->setJustificationType (juce::Justification::topLeft);
+        l->setFont (font (12.5f));
+        addAndMakeVisible (*l);
+    }
+    lookAndFeelChanged();
+}
+
+void RefPage::lookAndFeelChanged()
+{
+    const auto& t = themeOf (*this);
+    status.setColour (juce::Label::textColourId, t.accent);
+    info.setColour (juce::Label::textColourId, t.textDim);
+}
+
+void RefPage::resized()
+{
+    auto b = getLocalBounds().reduced (8, 6);
+    auto left = b.removeFromLeft (b.getWidth() * 2 / 5);
+    layoutCells (left);
+    b.removeFromLeft (16);
+    auto r = b.reduced (12, 10);
+    auto row = r.removeFromTop (34);
+    loadBtn.setBounds (row.removeFromLeft (row.getWidth() / 2 - 6));
+    row.removeFromLeft (12);
+    mode.setBounds (row);
+    r.removeFromTop (8);
+    auto row2 = r.removeFromTop (26);
+    gpu.setBounds (row2.removeFromLeft (row2.getWidth() / 2));
+    cancelBtn.setBounds (row2.removeFromRight (90));
+    r.removeFromTop (16);                              // progress bar (painted)
+    status.setBounds (r.removeFromTop (34));
+    auto row3 = r.removeFromBottom (30);
+    applyBtn.setBounds (row3.removeFromLeft (170));
+    row3.removeFromLeft (10);
+    clearBtn.setBounds (row3.removeFromLeft (100));
+    r.removeFromBottom (6);
+    info.setBounds (r);
+}
+
+void RefPage::paint (juce::Graphics& g)
+{
+    const auto& t = themeOf (*this);
+    auto b = getLocalBounds().reduced (8, 6);
+    b.removeFromLeft (b.getWidth() * 2 / 5 + 16);
+    drawPanel (g, b.toFloat(), t, 12.0f);
+    if (busy)
+    {
+        const auto bar = juce::Rectangle<float> ((float) b.getX() + 12.0f, (float) b.getY() + 10.0f + 34.0f + 8.0f + 26.0f + 5.0f,
+                                                 (float) b.getWidth() - 24.0f, 6.0f);
+        g.setColour (t.track);
+        g.fillRoundedRectangle (bar, 3.0f);
+        juce::ColourGradient cg (t.accent2, bar.getX(), 0.0f, t.accent, bar.getRight(), 0.0f, false);
+        g.setGradientFill (cg);
+        g.fillRoundedRectangle (bar.withWidth (bar.getWidth() * juce::jlimit (0.0f, 1.0f, progress)), 3.0f);
+    }
+}
+
+void RefPage::refresh()
+{
+    for (auto& c : cells) c->refresh();
+    proc.pollReference();
+
+    const bool nowBusy = proc.isReferenceBusy();
+    const float prog = proc.getReferenceProgress();
+    if (nowBusy != busy || std::abs (prog - progress) > 0.005f) { busy = nowBusy; progress = prog; repaint(); }
+    cancelBtn.setVisible (busy);
+    loadBtn.setEnabled (! busy);
+
+    const auto st = proc.getReferenceStatus();
+    if (status.getText() != st) status.setText (st, juce::dontSendNotification);
+
+    const auto p = proc.getReferenceProfile();
+    auto& m = proc.meters;
+    juce::String txt;
+    if (p.valid)
+    {
+        txt << ru ("Референс: ") << p.name << "\n";
+        if (p.balanceValid)
+            txt << ru ("Голос в референсе: ") << (p.balanceDb >= 0 ? "+" : "") << juce::String (p.balanceDb, 1)
+                << ru (" дБ относительно бита") << (p.approximate ? ru (" (примерно)") : juce::String()) << "\n";
+        txt << ru ("Динамика голоса: ") << juce::String (p.lra, 1) << ru (" дБ,  сибилянты: ") << juce::roundToInt (p.sibilance * 100.0f) << "%\n";
+    }
+    else
+        txt << ru ("Референс не загружен.\n");
+
+    const bool balOn = proc.apvts.getRawParameterValue (ParamIDs::balOn)->load() >= 0.5f;
+    if (proc.getLinkedBeats() > 0)
+        txt << ru ("Бит: ") << juce::String (m.beatLufs.load(), 1) << ru (" LUFS,  вокал: ") << juce::String (m.vocalLufs.load(), 1)
+            << " LUFS" << (balOn ? ru (",  подстройка ") + juce::String (m.balanceTrimDb.load(), 1) + ru (" дБ") : juce::String());
+    else
+        txt << ru ("Beat Link не найден: повесьте EZ Voice FX на бит (режим Beat Link), иначе баланс с битом не работает.");
     if (info.getText() != txt) info.setText (txt, juce::dontSendNotification);
 }
 

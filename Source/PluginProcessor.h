@@ -13,6 +13,8 @@
 #include "dsp/Analyzer.h"
 #include "dsp/LinkHub.h"
 #include "dsp/Mixing.h"
+#include "dsp/Match.h"
+#include "ref/Reference.h"
 #include "SampleFifo.h"
 
 namespace ParamIDs
@@ -42,6 +44,7 @@ namespace ParamIDs
     inline constexpr const char* deessFreq     = "deess_freq";
     inline constexpr const char* voxOn         = "vox_on";
     inline constexpr const char* voxAmt        = "vox_amt";
+    inline constexpr const char* voxMode       = "vox_mode";
     inline constexpr const char* fitOn         = "fit_on";
     inline constexpr const char* fitAmt        = "fit_amt";
     inline constexpr const char* levelOn       = "level_on";
@@ -59,6 +62,12 @@ namespace ParamIDs
     inline constexpr const char* listen        = "listen";
     inline constexpr const char* role          = "role";
     inline constexpr const char* unmaskAmt     = "unmask_amt";
+    inline constexpr const char* balOn         = "bal_on";
+    inline constexpr const char* balDb         = "bal_db";
+    inline constexpr const char* matchOn       = "match_on";
+    inline constexpr const char* matchAmt      = "match_amt";
+    inline constexpr const char* refMode       = "ref_mode";
+    inline constexpr const char* refGpu        = "ref_gpu";
     inline constexpr const char* bypass        = "bypass";
 }
 
@@ -126,6 +135,17 @@ public:
     bool isProRecommended() const;
     juce::String getHardwareText() const;
 
+    // ---- reference (message thread) ----
+    void startReference (const juce::File& f);
+    void cancelReference() { refAnalyzer.cancel(); }
+    bool isReferenceBusy() const { return refAnalyzer.isBusy(); }
+    float getReferenceProgress() const { return refAnalyzer.getProgress(); }
+    juce::String getReferenceStatus() const { return refAnalyzer.getStatus(); }
+    ez::ReferenceProfile getReferenceProfile() const { const juce::ScopedLock sl (reportLock); return refProfile; }
+    void pollReference();                 // editor timer: picks up finished analyses
+    void applyReference();
+    void clearReference();
+
     // ---- links ----
     bool isBeatRole() const { return param (ParamIDs::role) >= 0.5f; }
     int getLinkedBeats() const { return linkedBeats.load(); }
@@ -145,6 +165,9 @@ public:
         std::atomic<int> clicks { 0 }, latencySamples { 0 };
         std::atomic<double> sampleRate { 48000.0 };
         std::atomic<float> ownBands[ez::LinkHub::kBands], otherBands[ez::LinkHub::kBands], eqGains[4];
+        std::atomic<float> refBands[ez::kMatchBands], vocalProfile[ez::kMatchBands], matchGains[ez::kMatchBands];
+        std::atomic<float> beatLufs { -70.0f }, vocalLufs { -70.0f }, balanceTrimDb { 0.0f };
+        std::atomic<bool> refValid { false }, profileValid { false };
 
         static constexpr int kHistory = 300;   // 30 s of 100 ms loudness points
         std::atomic<float> history[kHistory];
@@ -155,6 +178,7 @@ public:
             for (auto& b : ownBands) b.store (0.0f);
             for (auto& b : otherBands) b.store (0.0f);
             for (auto& g : eqGains) g.store (0.0f);
+            for (int b = 0; b < ez::kMatchBands; ++b) { refBands[b].store (0.0f); vocalProfile[b].store (0.0f); matchGains[b].store (0.0f); }
         }
     } meters;
 
@@ -181,6 +205,13 @@ private:
     ez::FitEq fit;
     ez::BeatUnmask unmask;
     ez::BandMeter bandMeter;
+    ez::VocalProfiler profiler;
+    ez::MatchEq matchEq;
+    ez::BalanceTrim balance;
+    ez::LoudTracker beatTracker;
+    ez::ReferenceAnalyzer refAnalyzer;
+    ez::ReferenceProfile refProfile;
+    void setReferenceProfile (const ez::ReferenceProfile& p);
     ez::AutoLevel autoLevel;
     ez::Limiter limiter;
     ez::LoudnessMeter outMeter, inMeter;

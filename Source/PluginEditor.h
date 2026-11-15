@@ -47,13 +47,16 @@ private:
     ezui::SidebarTab tabMain { "Main", ezui::SidebarTab::Icon::Main };
     ezui::SidebarTab tabClean { "Clean", ezui::SidebarTab::Icon::Clean };
     ezui::SidebarTab tabLevel { "Level", ezui::SidebarTab::Icon::Level };
+    ezui::SidebarTab tabRef { "Reference", ezui::SidebarTab::Icon::Reference };
     ezui::SidebarTab tabAdv { "Advanced", ezui::SidebarTab::Icon::Advanced };
 
     ezui::SpectrumView spectrum;
     ezui::HistoryView history;
     ezui::OutputMeter meter;
+    ezui::ProfileView profileView;
 
-    std::unique_ptr<ezui::Page> pages[4];
+    static constexpr int kPages = 5;
+    std::unique_ptr<ezui::Page> pages[kPages];
     int currentPage = 0;
 
     juce::Slider mixSlider, outSlider;

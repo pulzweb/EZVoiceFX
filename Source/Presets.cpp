@@ -5,7 +5,7 @@ namespace
 struct Factory
 {
     const char* name;
-    std::vector<std::pair<const char*, float>> values;
+    std::vector<std::pair<const char*, double>> values;
 };
 
 const std::vector<Factory>& factory()
@@ -87,7 +87,7 @@ void PresetManager::loadFactory (int index)
     const auto& f = factory();
     if (index < 0 || index >= (int) f.size()) return;
     setAllToDefault();
-    for (auto& v : f[(size_t) index].values) setValue (v.first, v.second);
+    for (auto& v : f[(size_t) index].values) setValue (v.first, (float) v.second);
     state.state.setProperty ("presetName", f[(size_t) index].name, nullptr);
 }
 

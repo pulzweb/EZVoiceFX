@@ -30,7 +30,22 @@ public:
     }
 
     void setAmount (float a) noexcept { target = std::clamp (a, 0.0f, 1.0f); }
+    // false = Density (loudness kept), true = Loud like Renaissance Vox (make-up by peaks)
+    void setLoud (bool l) noexcept { loud = l; }
     float getGrDb() const noexcept { return grDb; }
+
+    static float reduction (float levelDb, float thr, float ratio) noexcept
+    {
+        constexpr float knee = 6.0f;
+        const float over = levelDb - thr;
+        if (over > knee * 0.5f) return over * (1.0f - 1.0f / ratio);
+        if (over > -knee * 0.5f)
+        {
+            const float k = over + knee * 0.5f;
+            return (1.0f - 1.0f / ratio) * k * k / (2.0f * knee);
+        }
+        return 0.0f;
+    }
 
     void process (float* const* ch, int numCh, int n) noexcept
     {
@@ -52,25 +67,24 @@ public:
             }
 
             float want = 0.0f;
-            if (amt > 0.005f && ltInit)
-            {
-                const float thr = ltDb + 4.0f - 14.0f * amt;
-                const float ratio = 1.5f + 4.5f * amt;
-                const float knee = 6.0f;
-                const float over = eDb - thr;
-                float red = 0.0f;
-                if (over > knee * 0.5f)       red = over * (1.0f - 1.0f / ratio);
-                else if (over > -knee * 0.5f)
-                {
-                    const float k = over + knee * 0.5f;
-                    red = (1.0f - 1.0f / ratio) * k * k / (2.0f * knee);
-                }
-                want = std::min (red, 18.0f);
-            }
+            const float thr = ltDb + 4.0f - 14.0f * amt;
+            const float ratio = 1.5f + 4.5f * amt;
+            const bool active = amt > 0.005f && ltInit;
+            if (active) want = std::min (reduction (eDb, thr, ratio), 18.0f);
 
             const float c = want > grDb ? gAtt : (grDb > 6.0f ? gRelSlow : gRelFast);
             grDb = want + c * (grDb - want);
-            if (eDb > -50.0f) makeupDb += mkAlpha * (grDb - makeupDb);
+
+            if (loud)
+            {
+                // RVox style: loud phrases keep their level, everything quieter comes up -> louder + denser
+                const float mkTarget = active ? std::min (reduction (ltDb + 6.0f, thr, ratio), 18.0f) + 4.0f * amt : 0.0f;
+                makeupDb += mkAlpha * (mkTarget - makeupDb);
+            }
+            else if (eDb > -50.0f)
+            {
+                makeupDb += mkAlpha * (grDb - makeupDb);     // density: average loudness kept
+            }
 
             const float g = dbToGain (makeupDb - grDb);
             for (int c2 = 0; c2 < numCh; ++c2) ch[c2][i] *= g;
@@ -83,7 +97,7 @@ private:
     int warm = 0, warmLen = 14400;
     float gAtt = 0.0f, gRelFast = 0.0f, gRelSlow = 0.0f;
     float ms = 0.0f, ltDb = -30.0f, grDb = 0.0f, makeupDb = 0.0f;
-    bool ltInit = false;
+    bool ltInit = false, loud = false;
     float amt = 0.0f, target = 0.0f, amtAlpha = 0.001f;
 };
 

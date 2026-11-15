@@ -6,7 +6,7 @@
 #endif
 
 #define AppName "EZ Voice FX"
-#define AppVersion "1.2.0"
+#define AppVersion "1.3.0"
 
 [Setup]
 AppId={{8F1B5A3E-6C2D-4E7A-9B1F-3C5D7E9A1B2C}
@@ -17,7 +17,7 @@ DefaultDirName={commonpf64}\EZVibe\EZ Voice FX
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 OutputDir={#DistDir}
-OutputBaseFilename=EZ-Voice-FX-1.2-Setup
+OutputBaseFilename=EZ-Voice-FX-1.3-Setup
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
